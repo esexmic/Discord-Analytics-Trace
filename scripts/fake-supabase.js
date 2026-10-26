@@ -87,6 +87,15 @@ class Query {
     return this;
   }
 
+  not(column, operator, value) {
+    if (operator === 'is' && value === null) {
+      this.filters.push((row) => row[column] !== null && row[column] !== undefined);
+    } else if (operator === 'eq') {
+      this.filters.push((row) => String(row[column]) !== String(value));
+    }
+    return this;
+  }
+
   gte(column, value) {
     this.filters.push((row) => compare(row[column], value) >= 0);
     return this;
@@ -153,8 +162,10 @@ class Query {
     }
 
     if (this.op === 'upsert') {
-      const key = this.conflict;
-      const existing = this.rows.find((row) => String(row[key]) === String(this.payload[key]));
+      const keyColumns = String(this.conflict).split(',').map((column) => column.trim());
+      const existing = this.rows.find((row) =>
+        keyColumns.every((column) => String(row[column]) === String(this.payload[column]))
+      );
       if (existing) {
         Object.assign(existing, this.payload);
         return { data: clone(existing), error: null };
@@ -215,6 +226,39 @@ function createFakeSupabase(store = new Map()) {
     store,
     from(table) {
       return new Query(store, table);
+    },
+    rpc(name, params = {}) {
+      if (name === 'event_stats') {
+        return {
+          then(resolve, reject) {
+            try {
+              const counts = new Map();
+              for (const row of store.get('events') || []) {
+                if (String(row.owner) !== String(params.p_owner)) continue;
+                if (params.p_since && String(row.created_at) < String(params.p_since)) continue;
+                counts.set(row.event_type, (counts.get(row.event_type) || 0) + 1);
+              }
+              resolve({
+                data: [...counts].map(([event_type, total]) => ({ event_type, total })),
+                error: null,
+              });
+            } catch (error) {
+              reject(error);
+            }
+          },
+          catch(reject) {
+            return this.then(undefined, reject);
+          },
+        };
+      }
+      return {
+        then(resolve) {
+          resolve({ data: null, error: { message: `function ${name} does not exist` } });
+        },
+        catch(reject) {
+          return this.then(undefined, reject);
+        },
+      };
     },
   };
 }

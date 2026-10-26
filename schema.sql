@@ -1,18 +1,66 @@
--- XYB schema
--- Ejecutar completo en Supabase > SQL Editor > New query > Run
+-- Trace by XYB — schema v2 (una cuenta por persona)
+--
+-- Ejecutar completo en Supabase > SQL Editor > New query > Run.
+-- Es idempotente y se puede correr sobre una base v1 sin borrar datos:
+-- lo que ya existía se asigna a la cuenta más vieja.
+--
+-- Cada fila de targets/events pertenece a un `owner` (el usuario del panel).
+-- Cada cuenta guarda su propio token de Discord y la identidad vinculada.
 
 create extension if not exists pgcrypto;
 
+-- ------------------------------------------------------------------ accounts
+
+create table if not exists public.accounts (
+  username         text primary key,
+  role             text not null default 'user',
+  password_salt    text not null,
+  password_hash    text not null,
+  hwid_hash        text,
+  hwid_label       text,
+  session_version  integer not null default 0,
+  created_at       timestamptz not null default now(),
+  last_login_at    timestamptz,
+  last_ip          text
+);
+
+alter table public.accounts add column if not exists discord_token    text;
+alter table public.accounts add column if not exists discord_user_id  text;
+alter table public.accounts add column if not exists discord_username text;
+alter table public.accounts add column if not exists discord_avatar   text;
+
+create index if not exists accounts_hwid_idx on public.accounts (hwid_hash);
+
+-- ------------------------------------------------------------------- targets
+
 create table if not exists public.targets (
-  user_id    text primary key,
+  owner      text not null,
+  user_id    text not null,
   username   text,
   note       text,
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  primary key (owner, user_id)
 );
+
+-- Migración v1 -> v2: la tabla vieja no tenía owner.
+alter table public.targets add column if not exists owner text;
+update public.targets
+   set owner = coalesce(
+     (select username from public.accounts order by created_at asc limit 1),
+     'legacy'
+   )
+ where owner is null;
+alter table public.targets alter column owner set not null;
+alter table public.targets drop constraint if exists targets_pkey;
+alter table public.targets add primary key (owner, user_id);
+
+create index if not exists targets_owner_idx on public.targets (owner, created_at desc);
+
+-- -------------------------------------------------------------------- events
 
 create table if not exists public.events (
   id           bigserial primary key,
-  event_type   text not null,          -- message | message_edit | message_delete | voice_* | presence
+  event_type   text not null,
   message_id   text,
   user_id      text not null,
   username     text,
@@ -26,34 +74,45 @@ create table if not exists public.events (
   created_at   timestamptz not null default now()
 );
 
-create index if not exists events_created_at_idx on public.events (created_at desc);
-create index if not exists events_user_idx       on public.events (user_id, created_at desc);
-create index if not exists events_type_idx       on public.events (event_type, created_at desc);
-create index if not exists events_message_idx    on public.events (message_id, event_type);
-create index if not exists events_guild_idx      on public.events (guild_id, created_at desc);
+alter table public.events add column if not exists owner text;
+update public.events
+   set owner = coalesce(
+     (select username from public.accounts order by created_at asc limit 1),
+     'legacy'
+   )
+ where owner is null;
+alter table public.events alter column owner set not null;
 
--- Cuentas del panel. El primer registro es admin y puede ver la key de
--- registro; los demás son usuarios. La contraseña va con scrypt + salt y el
--- HWID como sha256 (nunca en claro).
-create table if not exists public.accounts (
-  username         text primary key,
-  role             text not null default 'user',   -- admin | user
-  password_salt    text not null,
-  password_hash    text not null,
-  hwid_hash        text,                            -- sha256 del dispositivo vinculado
-  hwid_label       text,
-  session_version  integer not null default 0,      -- sube al cambiar pass o desvincular HWID
-  created_at       timestamptz not null default now(),
-  last_login_at    timestamptz,
-  last_ip          text
-);
+create index if not exists events_owner_created_idx on public.events (owner, created_at desc);
+create index if not exists events_owner_type_idx    on public.events (owner, event_type, created_at desc);
+create index if not exists events_owner_user_idx    on public.events (owner, user_id, created_at desc);
+create index if not exists events_created_at_idx    on public.events (created_at desc);
+create index if not exists events_message_idx       on public.events (message_id, event_type);
+create index if not exists events_guild_idx         on public.events (guild_id, created_at desc);
 
-create index if not exists accounts_hwid_idx on public.accounts (hwid_hash);
-
--- RLS on, cero policies: solo la service_role key (la del bot) puede leer/escribir.
+-- RLS on, cero policies: solo la service_role key del servidor puede leer/escribir.
 alter table public.targets  enable row level security;
 alter table public.events   enable row level security;
 alter table public.accounts enable row level security;
+
+-- Conteo por tipo para el resumen del panel en una sola consulta. Sin esto el
+-- panel tendría que pedir 11 counts por owner y la latencia se nota.
+create or replace function public.event_stats(p_owner text, p_since timestamptz)
+returns table (event_type text, total bigint)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select e.event_type, count(*)::bigint as total
+    from public.events e
+   where e.owner = p_owner
+     and e.created_at >= p_since
+   group by e.event_type;
+$$;
+
+revoke all on function public.event_stats(text, timestamptz) from public, anon, authenticated;
+grant execute on function public.event_stats(text, timestamptz) to service_role;
 
 -- Retención: borra eventos viejos. Ejecutar a mano, con pg_cron, o desde el SQL
 -- editor de Supabase una vez por semana:

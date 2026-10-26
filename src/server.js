@@ -11,23 +11,13 @@ const queue = require('./queue');
 const targets = require('./targets');
 const settings = require('./settings');
 const accounts = require('./accounts');
-const {
-  startBot,
-  stopBot,
-  getClient,
-  getPresenceSnapshot,
-  getPresenceDetails,
-  getVoiceSnapshot,
-  getProfile,
-  rememberProfile,
-  avatarUrl,
-  botStatus,
-  displayName,
-} = require('./bot');
+const bot = require('./bot');
 
 const app = express();
 const COOKIE_NAME = 'xyb_session';
 const SESSION_MS = 7 * 24 * 60 * 60 * 1000;
+const FEED_LIMIT = 60;
+const SUMMARY_CACHE_MS = 4000;
 const EVENT_TYPES = [
   'message',
   'message_edit',
@@ -69,9 +59,9 @@ function issueToken(account) {
   return `${payload}.${sign(payload)}`;
 }
 
-/** Devuelve el payload { u, v, exp } o null si la firma/vencimiento no dan. */
 function readToken(token) {
   if (!token) return null;
+  if (revokedTokens.has(token)) return null;
   const index = token.lastIndexOf('.');
   if (index < 1) return null;
   const payload = token.slice(0, index);
@@ -90,6 +80,28 @@ function readToken(token) {
   }
   if (!parsed || typeof parsed.u !== 'string' || Number(parsed.exp) <= Date.now()) return null;
   return parsed;
+}
+
+/**
+ * El token de sesión es un HMAC sin estado: borrar la cookie en el logout no
+ * impide que una copia filtrada siga sirviendo hasta el vencimiento. Se
+ * guardan los logout en memoria hasta que expiren.
+ */
+const revokedTokens = new Map(); // token -> exp
+let revokedPruneAt = 0;
+
+function revokeToken(token) {
+  if (!token) return;
+  const parsed = readToken(token);
+  revokedTokens.set(token, Number(parsed?.exp) || Date.now() + SESSION_MS);
+
+  const now = Date.now();
+  if (now > revokedPruneAt || revokedTokens.size > 5000) {
+    revokedPruneAt = now + 60_000;
+    for (const [value, exp] of revokedTokens) {
+      if (exp <= now) revokedTokens.delete(value);
+    }
+  }
 }
 
 function readCookie(req, name) {
@@ -121,32 +133,17 @@ function cookie(req, value, maxAgeSeconds) {
   return parts.join('; ');
 }
 
-/** Acepta `Authorization: Bearer xyb_…` o `x-api-key: xyb_…`. */
-function bearerToken(req) {
-  const header = String(req.headers.authorization || '');
-  if (/^bearer\s+/i.test(header)) return header.replace(/^bearer\s+/i, '').trim();
-  const key = req.headers['x-api-key'];
-  return typeof key === 'string' ? key.trim() : '';
-}
-
 async function currentAuth(req) {
   const payload = readToken(readCookie(req, COOKIE_NAME));
-  if (payload) {
-    const account = await accounts.validateSession(payload.u, payload.v);
-    if (account) return { type: 'session', account };
-  }
-  const token = bearerToken(req);
-  if (!token) return null;
-  const key = settings.verifyKey(token);
-  return key ? { type: 'key', key } : null;
+  if (!payload) return null;
+  const account = await accounts.validateSession(payload.u, payload.v);
+  return account ? { account } : null;
 }
 
 async function requireAuth(req, res, next) {
   try {
     const auth = await currentAuth(req);
-    if (!auth) {
-      return res.status(401).json({ error: 'Sesión o API key requerida' });
-    }
+    if (!auth) return res.status(401).json({ error: 'Iniciá sesión para continuar', code: 'unauthorized' });
     req.auth = auth;
     next();
   } catch (error) {
@@ -154,16 +151,12 @@ async function requireAuth(req, res, next) {
   }
 }
 
-/** Rutas sensibles: credenciales, keys y control del bot. Solo cookie. */
-function requireSession(req, res, next) {
-  if (req.auth?.type !== 'session') {
-    return res.status(403).json({ error: 'Esta ruta necesita sesión del panel, no API key' });
-  }
-  next();
+function ownerOf(req) {
+  return req.auth.account.username;
 }
 
 const attempts = new Map();
-const MAX_ATTEMPTS = 10;
+const MAX_ATTEMPTS = 12;
 const ATTEMPT_WINDOW_MS = 60_000;
 
 function rateLimited(ip) {
@@ -176,7 +169,6 @@ function rateLimited(ip) {
   return entry.count >= MAX_ATTEMPTS;
 }
 
-/** Solo cuentan los intentos fallidos: loguearse bien no gasta cupo. */
 function noteFailure(ip) {
   const now = Date.now();
   const entry = attempts.get(ip) || { count: 0, reset: now + ATTEMPT_WINDOW_MS };
@@ -187,6 +179,19 @@ function noteFailure(ip) {
   entry.count += 1;
   attempts.set(ip, entry);
   if (attempts.size > 5000) attempts.clear();
+}
+
+function startSession(req, res, account) {
+  res.setHeader('Set-Cookie', cookie(req, issueToken(account), Math.floor(SESSION_MS / 1000)));
+}
+
+function loginPayload(account) {
+  return {
+    ok: true,
+    username: account.username,
+    role: account.role || 'user',
+    account,
+  };
 }
 
 app.post('/api/login', async (req, res) => {
@@ -203,15 +208,16 @@ app.post('/api/login', async (req, res) => {
       hwidLabel: req.body?.hwid_label,
       ip,
     });
-    res.setHeader('Set-Cookie', cookie(req, issueToken(account), Math.floor(SESSION_MS / 1000)));
-    res.json({ ok: true, username: account.username, role: account.role, account });
+    startSession(req, res, account);
+    bot.kick(account.username);
+    res.json(loginPayload(account));
   } catch (error) {
     noteFailure(ip);
     sendError(res, error);
   }
 });
 
-async function handleRegister(req, res) {
+app.post('/api/register', async (req, res) => {
   const ip = req.ip || 'unknown';
   if (rateLimited(ip)) {
     return res.status(429).json({ error: 'Demasiados intentos, esperá un minuto' });
@@ -221,24 +227,18 @@ async function handleRegister(req, res) {
     const account = await accounts.register({
       username: req.body?.username,
       password: req.body?.password,
-      key: req.body?.key ?? req.body?.access_key,
       hwid: req.body?.hwid,
       hwidLabel: req.body?.hwid_label,
       ip,
     });
-    res.setHeader('Set-Cookie', cookie(req, issueToken(account), Math.floor(SESSION_MS / 1000)));
-    res.json({ ok: true, username: account.username, role: account.role, account });
+    startSession(req, res, account);
+    res.json(loginPayload(account));
   } catch (error) {
     noteFailure(ip);
     sendError(res, error);
   }
-}
+});
 
-app.post('/api/register', handleRegister);
-// Alias histórico: el panel viejo llamaba setup al alta inicial.
-app.post('/api/setup', handleRegister);
-
-/** Reata una cuenta a un dispositivo nuevo con contraseña + key de acceso. */
 app.post('/api/recover-device', async (req, res) => {
   const ip = req.ip || 'unknown';
   if (rateLimited(ip)) {
@@ -248,13 +248,13 @@ app.post('/api/recover-device', async (req, res) => {
     const account = await accounts.rebindDevice({
       username: req.body?.username,
       password: req.body?.password,
-      key: req.body?.key,
       hwid: req.body?.hwid,
       hwidLabel: req.body?.hwid_label,
       ip,
     });
-    res.setHeader('Set-Cookie', cookie(req, issueToken(account), Math.floor(SESSION_MS / 1000)));
-    res.json({ ok: true, username: account.username, role: account.role, account });
+    startSession(req, res, account);
+    bot.kick(account.username);
+    res.json(loginPayload(account));
   } catch (error) {
     noteFailure(ip);
     sendError(res, error);
@@ -262,126 +262,201 @@ app.post('/api/recover-device', async (req, res) => {
 });
 
 app.post('/api/logout', (req, res) => {
+  revokeToken(readCookie(req, COOKIE_NAME));
   res.setHeader('Set-Cookie', cookie(req, '', 0));
   res.json({ ok: true });
 });
 
 app.get('/api/session', async (req, res) => {
-  let auth = null;
-  let dbIssue = null;
-
   try {
-    auth = await currentAuth(req);
-  } catch (error) {
-    dbIssue = error.message;
-  }
-
-  let needsSetup = false;
-  try {
-    needsSetup = !(await accounts.hasAny()) && !settings.hasAccount();
-  } catch (error) {
-    dbIssue = dbIssue || error.message;
-  }
-
-  res.json({
-    authed: Boolean(auth),
-    authType: auth?.type ?? null,
-    username: auth?.account?.username ?? null,
-    role: auth?.account?.role ?? null,
-    needsSetup,
-    configured: settings.publicView().configured,
-    registration: {
-      requiresKey: true,
-      hasAccounts: dbIssue ? null : !needsSetup,
-    },
-    dbError: dbIssue,
-  });
-});
-
-/* --------------------------------------------------------------- setup ---- */
-
-app.get('/api/setup', async (req, res) => {
-  try {
-    const view = settings.publicView();
+    const auth = await currentAuth(req);
     res.json({
-      needsSetup: !(await accounts.hasAny()) && !settings.hasAccount(),
-      configured: view.configured,
+      authed: Boolean(auth),
+      username: auth?.account?.username ?? null,
+      role: auth?.account?.role ?? null,
+      account: auth?.account ?? null,
+      db: dbState(),
     });
   } catch (error) {
-    sendError(res, error);
+    res.json({ authed: false, db: dbState(), error: error.message });
   }
 });
 
-app.post('/api/account', requireAuth, requireSession, async (req, res) => {
-  try {
-    const legacy = settings.accountView();
-    if (legacy.source === 'env' && legacy.username === req.auth.account.username) {
-      return res.status(409).json({
-        error: 'La cuenta viene de DASHBOARD_USERNAME / DASHBOARD_PASSWORD; cambiala en el deploy',
-      });
+/* ------------------------------------------------------------- resumen --- */
+
+const summaries = new Map(); // owner -> { at, data }
+
+function invalidateSummary(owner) {
+  if (owner) summaries.delete(owner);
+  else summaries.clear();
+}
+
+function dbState() {
+  const problem = db.problemView();
+  return {
+    configured: db.isConfigured(),
+    ok: db.isHealthy(),
+    code: problem?.code || null,
+    message: problem?.message || null,
+  };
+}
+
+function emptySummary(owner, extra = {}) {
+  return {
+    total24h: 0,
+    targets: 0,
+    online: 0,
+    presence: {},
+    activity: {},
+    voice: {},
+    avatars: {},
+    byType: Object.fromEntries(EVENT_TYPES.map((type) => [type, 0])),
+    bot: bot.status(owner),
+    queue: { pending: queue.size, dropped: queue.dropped },
+    approximate: false,
+    ...extra,
+  };
+}
+
+/**
+ * Conteo de eventos en una sola consulta. Usa el RPC `event_stats` del schema
+ * v2; si todavía no existe cae a traer los tipos (máximo 1000 filas de
+ * PostgREST) y marca el resultado como aproximado.
+ */
+async function eventCounts(owner, since) {
+  const client = db.getClient();
+  if (typeof client.rpc === 'function') {
+    const { data, error } = await client.rpc('event_stats', { p_owner: owner, p_since: since });
+    if (!error) {
+      const counts = Object.fromEntries(EVENT_TYPES.map((type) => [type, 0]));
+      let total = 0;
+      for (const row of data || []) {
+        const type = row.event_type;
+        const value = Number(row.total) || 0;
+        total += value;
+        if (type in counts) counts[type] = value;
+        else counts[type] = value;
+      }
+      return { counts, total, approximate: false };
     }
-    const result = await accounts.changeAccount(req.auth.account.username, req.body?.current, {
-      username: req.body?.username,
-      password: req.body?.password,
+    if (!/function|schema cache|PGRST202|42883/i.test(String(error.message || ''))) {
+      throw new Error(error.message);
+    }
+  }
+
+  const { data, error } = await client
+    .from('events')
+    .select('event_type')
+    .eq('owner', owner)
+    .gte('created_at', since)
+    .limit(10000);
+  if (error) throw new Error(error.message);
+
+  const counts = Object.fromEntries(EVENT_TYPES.map((type) => [type, 0]));
+  let total = 0;
+  for (const row of data || []) {
+    total += 1;
+    counts[row.event_type] = (counts[row.event_type] || 0) + 1;
+  }
+  return { counts, total, approximate: true };
+}
+
+async function buildSummary(owner) {
+  if (!db.isConfigured() || !db.isHealthy()) {
+    const problem = db.problemView();
+    return emptySummary(owner, {
+      dbError: problem?.message || 'La base no está configurada',
     });
-    res.setHeader('Set-Cookie', cookie(req, issueToken(result), Math.floor(SESSION_MS / 1000)));
-    res.json({ ok: true, username: result.username, account: result });
-  } catch (error) {
-    sendError(res, error);
   }
-});
 
-/** Desvincula el dispositivo actual. Cierra las sesiones abiertas de la cuenta. */
-app.delete('/api/account/hwid', requireAuth, requireSession, async (req, res) => {
-  try {
-    const view = await accounts.resetHwid(req.auth.account.username, req.body?.password);
-    res.setHeader('Set-Cookie', cookie(req, '', 0));
-    res.json({ ok: true, account: view });
-  } catch (error) {
-    sendError(res, error);
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const [targetRows, counts] = await Promise.all([
+    targets.list(owner),
+    eventCounts(owner, since),
+  ]);
+
+  const snapshots = bot.snapshots(owner);
+  const presence = {};
+  const activity = {};
+  const voice = {};
+  const avatars = {};
+
+  for (const row of targetRows) {
+    const userId = String(row.user_id);
+    presence[userId] = snapshots.presence[userId] ?? null;
+    if (snapshots.details[userId]) activity[userId] = snapshots.details[userId];
+    if (snapshots.voice[userId]) voice[userId] = snapshots.voice[userId];
+    const profile = bot.getProfile(owner, userId);
+    avatars[userId] = profile?.avatar_url || bot.avatarUrl(userId, null);
   }
-});
 
-app.get('/api/registration-key', requireAuth, requireSession, (req, res) => {
-  if (req.auth.account.role !== 'admin') {
-    return res.status(403).json({ error: 'Solo el administrador puede ver la key de acceso' });
+  const online = targetRows.filter((row) => isOnline(presence[String(row.user_id)])).length;
+
+  return {
+    total24h: counts.total,
+    targets: targetRows.length,
+    online,
+    presence,
+    activity,
+    voice,
+    avatars,
+    byType: counts.counts,
+    bot: bot.status(owner),
+    queue: { pending: queue.size, dropped: queue.dropped },
+    approximate: counts.approximate,
+  };
+}
+
+async function getSummary(owner) {
+  const cached = summaries.get(owner);
+  if (cached && Date.now() - cached.at < SUMMARY_CACHE_MS) return cached.data;
+  const data = await buildSummary(owner);
+  summaries.set(owner, { at: Date.now(), data });
+  return data;
+}
+
+async function feedEvents(owner, { limit = FEED_LIMIT, offset = 0, type, userId, guildId, search } = {}) {
+  let query = db
+    .getClient()
+    .from('events')
+    .select('*')
+    .eq('owner', owner)
+    .order('created_at', { ascending: false })
+    .order('id', { ascending: false })
+    .range(offset, offset + limit - 1);
+
+  if (type === 'voice') {
+    query = query.in('event_type', ['voice_join', 'voice_leave', 'voice_move', 'voice_stream', 'voice_camera']);
+  } else if (type === 'message') {
+    query = query.in('event_type', ['message', 'message_edit', 'message_delete']);
+  } else if (type) {
+    query = query.eq('event_type', type);
   }
-  res.json(settings.registrationKeyView());
-});
-
-/* ---------------------------------------------------------------- keys ---- */
-
-app.get('/api/keys', requireAuth, requireSession, (req, res) => {
-  res.json({ keys: settings.listKeys() });
-});
-
-app.post('/api/keys', requireAuth, requireSession, (req, res) => {
-  try {
-    const created = settings.createKey(req.body?.name);
-    res.json({ ok: true, token: created.token, key: created.key });
-  } catch (error) {
-    sendError(res, error);
+  if (userId) query = query.eq('user_id', userId);
+  if (guildId) query = query.eq('guild_id', guildId);
+  if (search) {
+    query = query.or(
+      `username.ilike.%${search}%,content.ilike.%${search}%,old_content.ilike.%${search}%,channel_name.ilike.%${search}%`
+    );
   }
-});
 
-app.delete('/api/keys/:id', requireAuth, requireSession, (req, res) => {
-  try {
-    settings.revokeKey(req.params.id);
-    res.json({ ok: true });
-  } catch (error) {
-    sendError(res, error);
-  }
-});
+  const { data, error } = await query;
+  if (error) throw new Error(error.message);
+  return data || [];
+}
 
 /* --------------------------------------------------------------- helpers -- */
 
 function sendError(res, error) {
   const code = error?.code;
-  if (code === 'not_configured' || code === 'db_unavailable' || code === 'invalid_config' || code === 'network') {
+  if (code === 'not_configured' || code === 'db_unavailable' || code === 'invalid_config'
+    || code === 'network' || code === 'schema') {
     return res.status(503).json({ error: error.message, code });
   }
-  if (code === 'bad_credentials') return res.status(401).json({ error: error.message, code });
-  if (code === 'bad_key' || code === 'hwid_mismatch') return res.status(403).json({ error: error.message, code });
+  if (code === 'bad_credentials' || code === 'unauthorized') {
+    return res.status(401).json({ error: error.message, code });
+  }
+  if (code === 'hwid_mismatch') return res.status(403).json({ error: error.message, code });
   if (code === 'exists' || code === 'busy') return res.status(409).json({ error: error.message, code });
   if (code === 'not_found') return res.status(404).json({ error: error.message, code });
   if (code === 'invalid' || code === 'invalid_token') return res.status(400).json({ error: error.message, code });
@@ -405,201 +480,51 @@ function snowflake(value) {
   return /^\d{17,20}$/.test(id) ? id : null;
 }
 
-// El panel refresca cada 20s por pestaña abierta; con 5s de cache alcanza para
-// no castigar el free tier de Supabase con 9 counts por request.
-const summaryCache = { at: 0, data: null };
+/* --------------------------------------------------------------- arranque -- */
 
-function invalidateSummary() {
-  summaryCache.at = 0;
-  summaryCache.data = null;
-}
+app.get('/api/bootstrap', requireAuth, async (req, res) => {
+  const owner = ownerOf(req);
+  bot.kick(owner);
 
-/**
- * Respuesta base del resumen. Se devuelve también cuando la DB no responde, así
- * el panel sigue operativo y muestra el error real en vez de romperse.
- */
-function emptySummary(extra = {}) {
-  return {
-    total24h: 0,
-    targets: 0,
-    online: 0,
-    presence: {},
-    activity: {},
-    voice: {},
-    avatars: {},
-    byType: Object.fromEntries(EVENT_TYPES.map((type) => [type, 0])),
-    bot: botStatus(),
-    queue: { pending: queue.size, dropped: queue.dropped },
-    configured: settings.publicView().configured,
-    ...extra,
-  };
-}
+  const [targetRows, summary, events, guilds] = await Promise.all([
+    targets.list(owner).catch((error) => {
+      console.error('[web] objetivos no disponibles:', net.describe(error));
+      return [];
+    }),
+    getSummary(owner).catch((error) => {
+      console.error('[web] resumen no disponible:', net.describe(error));
+      return emptySummary(owner, { dbError: net.describe(error) });
+    }),
+    db.isConfigured() && db.isHealthy()
+      ? feedEvents(owner).catch((error) => {
+        console.error('[web] eventos no disponibles:', net.describe(error));
+        return [];
+      })
+      : Promise.resolve([]),
+    Promise.resolve(bot.guilds(owner)),
+  ]);
 
-/* ------------------------------------------------------------- settings --- */
+  const status = bot.status(owner);
+  status.configured = Boolean(req.auth.account.hasToken) || status.configured;
 
-app.get('/api/settings', requireAuth, requireSession, (req, res) => {
-  const view = settings.publicView();
-  const account = req.auth.account;
-  const legacy = settings.accountView();
-  const lockedByEnv = legacy.source === 'env' && legacy.username === account.username;
   res.json({
-    ...view,
-    username: account.username,
-    role: account.role || 'user',
-    accountSource: lockedByEnv ? 'env' : account.legacy ? 'file' : 'database',
-    hwidLinked: account.hwid_linked ?? null,
-    hwidLabel: account.hwid_label ?? null,
-    trackAll: config.trackAll,
-    seedTargets: config.seedTargets,
-    bot: botStatus(),
+    account: req.auth.account,
+    bot: status,
+    targets: targetRows,
+    summary,
+    events,
+    next: events.length === FEED_LIMIT ? FEED_LIMIT : null,
+    guilds,
+    db: dbState(),
   });
 });
-
-/**
- * Guarda credenciales desde el panel. Reacciona en caliente: si cambió
- * Supabase, reconstruye el cliente y recarga targets; si cambió el token,
- * reconecta el gateway.
- */
-app.put('/api/settings', requireAuth, requireSession, async (req, res) => {
-  const before = settings.get();
-  let after;
-  try {
-    after = settings.update(req.body || {});
-  } catch (error) {
-    return sendError(res, error);
-  }
-
-  const supabaseChanged =
-    before.supabaseUrl !== after.supabaseUrl || before.supabaseKey !== after.supabaseKey;
-  const tokenChanged = before.discordToken !== after.discordToken;
-
-  let supabaseTest = null;
-  if (supabaseChanged) {
-    db.reset();
-    invalidateSummary();
-    supabaseTest = await db.probe();
-    if (supabaseTest.ok) {
-      await targets.refresh({ force: true });
-    } else {
-      console.error('[web] Supabase guardado pero la prueba falló:', supabaseTest.message);
-    }
-  }
-
-  if (before.selfPresence !== after.selfPresence && after.selfPresence) {
-    const instance = getClient();
-    if (instance?.isReady?.()) {
-      try {
-        const pending = instance.user.setStatus(after.selfPresence);
-        if (pending && typeof pending.catch === 'function') {
-          pending.catch((error) => console.warn('[web] no se pudo aplicar el estado propio:', error.message));
-        }
-      } catch (error) {
-        console.warn('[web] no se pudo aplicar el estado propio:', error.message);
-      }
-    }
-  }
-
-  let connectError = null;
-  if (tokenChanged) {
-    if (after.discordToken) {
-      try {
-        await startBot(after.discordToken);
-      } catch (error) {
-        connectError = error.message;
-      }
-    } else {
-      await stopBot();
-    }
-  }
-
-  const view = settings.publicView();
-  res.json({
-    ok: true,
-    settings: { ...view, bot: botStatus() },
-    supabaseTest,
-    connectError,
-    bot: botStatus(),
-  });
-});
-
-/**
- * Prueba credenciales sin guardarlas. Acepta valores en el body para poder
- * validar antes de escribir: { supabaseUrl, supabaseKey, discordToken }.
- */
-app.post('/api/settings/test', requireAuth, requireSession, async (req, res) => {
-  const stored = settings.get();
-  const results = {};
-
-  let url = stored.supabaseUrl;
-  let key = stored.supabaseKey;
-  try {
-    if (req.body?.supabaseUrl !== undefined) url = settings.sanitize('supabaseUrl', req.body.supabaseUrl);
-    if (req.body?.supabaseKey !== undefined) key = settings.sanitize('supabaseKey', req.body.supabaseKey);
-  } catch (error) {
-    return sendError(res, error);
-  }
-
-  if (!url || !key) {
-    results.supabase = { ok: false, message: 'Faltan URL o secret key' };
-  } else {
-    results.supabase = await db.probeCredentials(url, key);
-  }
-
-  const token = String(
-    req.body?.discordToken !== undefined ? req.body.discordToken : stored.discordToken
-  ).trim();
-
-  if (!token) {
-    results.discord = { ok: false, message: 'Falta el token' };
-  } else {
-    try {
-      const response = await net.fetchWithRetry('https://discord.com/api/v10/users/@me', {
-        headers: { Authorization: token },
-      }, { retries: 2, timeoutMs: 15_000, label: 'discord-token' });
-      if (response.status === 200) {
-        const user = await response.json();
-        results.discord = {
-          ok: true,
-          message: `Token válido: ${user.global_name || user.username} (${user.id})`,
-          user: { id: user.id, username: user.username, global_name: user.global_name ?? null },
-        };
-      } else {
-        results.discord = { ok: false, message: `Discord respondió ${response.status}: token inválido o revocado` };
-      }
-    } catch (error) {
-      results.discord = { ok: false, message: `No se pudo llegar a Discord: ${net.describe(error)}` };
-    }
-  }
-
-  res.json({ ok: results.supabase.ok && results.discord.ok, results });
-});
-
-app.post('/api/bot/connect', requireAuth, requireSession, async (req, res) => {
-  try {
-    const token = req.body?.token ? String(req.body.token).trim() : undefined;
-    await startBot(token);
-    invalidateSummary();
-    res.json({ ok: true, bot: botStatus() });
-  } catch (error) {
-    sendError(res, error);
-  }
-});
-
-app.post('/api/bot/disconnect', requireAuth, requireSession, async (req, res) => {
-  await stopBot();
-  invalidateSummary();
-  res.json({ ok: true, bot: botStatus() });
-});
-
-/* --------------------------------------------------------------- routes --- */
 
 app.get('/health', (req, res) => {
   res.json({
     ok: true,
     uptime: Math.round(process.uptime()),
-    bot: botStatus().connected,
-    db: db.isConfigured(),
-    targetsError: targets.status().error,
+    db: dbState(),
+    targets: targets.status().size,
   });
 });
 
@@ -611,110 +536,26 @@ app.get('/robots.txt', (req, res) => {
   res.type('text/plain').send('User-agent: *\nDisallow: /\n');
 });
 
+/* ---------------------------------------------------------------- datos --- */
+
 app.get('/api/summary', requireAuth, async (req, res) => {
-  try {
-    if (!db.isConfigured()) {
-      return res.json(emptySummary({ dbError: 'Supabase no está configurado' }));
-    }
-
-    if (summaryCache.data && Date.now() - summaryCache.at < 5000) {
-      return res.json(summaryCache.data);
-    }
-
-    const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-    const view = settings.publicView();
-
-    const [total, targetRows, ...byType] = await Promise.all([
-      db.getClient().from('events').select('id', { count: 'exact', head: true }).gte('created_at', since),
-      targets.list(),
-      ...EVENT_TYPES.map((type) =>
-        db
-          .getClient()
-          .from('events')
-          .select('id', { count: 'exact', head: true })
-          .eq('event_type', type)
-          .gte('created_at', since)
-      ),
-    ]);
-
-    const counts = {};
-    EVENT_TYPES.forEach((type, index) => {
-      counts[type] = byType[index].count ?? 0;
-    });
-
-    const snapshot = getPresenceSnapshot();
-    const details = getPresenceDetails();
-    const voiceAll = getVoiceSnapshot();
-
-    const presence = {};
-    const activity = {};
-    const voice = {};
-    const avatars = {};
-    for (const row of targetRows) {
-      presence[row.user_id] = snapshot[row.user_id] ?? null;
-      if (details[row.user_id]) activity[row.user_id] = details[row.user_id];
-      if (voiceAll[row.user_id]) voice[row.user_id] = voiceAll[row.user_id];
-      const profile = getProfile(row.user_id);
-      avatars[row.user_id] = profile?.avatar_url || avatarUrl(row.user_id, null);
-    }
-
-    const payload = {
-      total24h: total.count ?? 0,
-      targets: targetRows.length,
-      online: targetRows.filter((row) => isOnline(presence[row.user_id])).length,
-      presence,
-      activity,
-      voice,
-      avatars,
-      byType: counts,
-      bot: botStatus(),
-      queue: { pending: queue.size, dropped: queue.dropped },
-      configured: view.configured,
-    };
-
-    summaryCache.at = Date.now();
-    summaryCache.data = payload;
-    res.json(payload);
-  } catch (error) {
-    console.error('[web] resumen no disponible:', net.describe(error));
-    res.json(emptySummary({ dbError: net.describe(error) }));
-  }
+  res.json(await getSummary(ownerOf(req)));
 });
 
 app.get('/api/events', requireAuth, async (req, res) => {
+  const owner = ownerOf(req);
   try {
     const limit = Math.min(Number.parseInt(req.query.limit, 10) || 50, 200);
     const offset = Math.max(Number.parseInt(req.query.offset, 10) || 0, 0);
-    const type = sanitizeSearch(req.query.type);
-    const userId = sanitizeSearch(req.query.user);
-    const guildId = sanitizeSearch(req.query.guild);
-    const search = sanitizeSearch(req.query.q);
-
-    let query = db
-      .getClient()
-      .from('events')
-      .select('*')
-      .order('created_at', { ascending: false })
-      .order('id', { ascending: false })
-      .range(offset, offset + limit - 1);
-
-    if (type === 'voice') {
-      query = query.in('event_type', ['voice_join', 'voice_leave', 'voice_move', 'voice_stream', 'voice_camera']);
-    } else if (type) {
-      query = query.eq('event_type', type);
-    }
-    if (userId) query = query.eq('user_id', userId);
-    if (guildId) query = query.eq('guild_id', guildId);
-    if (search) {
-      query = query.or(
-        `username.ilike.%${search}%,content.ilike.%${search}%,old_content.ilike.%${search}%,channel_name.ilike.%${search}%`
-      );
-    }
-
-    const { data, error } = await query;
-    if (error) throw new Error(error.message);
-
-    res.json({ events: data || [], next: (data || []).length === limit ? offset + limit : null });
+    const events = await feedEvents(owner, {
+      limit,
+      offset,
+      type: sanitizeSearch(req.query.type),
+      userId: sanitizeSearch(req.query.user),
+      guildId: sanitizeSearch(req.query.guild),
+      search: sanitizeSearch(req.query.q),
+    });
+    res.json({ events, next: events.length === limit ? offset + limit : null });
   } catch (error) {
     console.error('[web] eventos no disponibles:', net.describe(error));
     res.json({ events: [], next: null, dbError: net.describe(error) });
@@ -722,9 +563,10 @@ app.get('/api/events', requireAuth, async (req, res) => {
 });
 
 app.get('/api/targets', requireAuth, async (req, res) => {
+  const owner = ownerOf(req);
   try {
     if (!db.isConfigured()) return res.json({ targets: [], configured: false });
-    res.json({ targets: await targets.list(), configured: true });
+    res.json({ targets: await targets.list(owner), configured: true });
   } catch (error) {
     console.error('[web] objetivos no disponibles:', net.describe(error));
     res.json({ targets: [], configured: true, dbError: net.describe(error) });
@@ -732,6 +574,7 @@ app.get('/api/targets', requireAuth, async (req, res) => {
 });
 
 app.post('/api/targets', requireAuth, async (req, res) => {
+  const owner = ownerOf(req);
   try {
     const userId = snowflake(req.body?.user_id);
     if (!userId) return res.status(400).json({ error: 'ID de Discord inválido' });
@@ -739,43 +582,51 @@ app.post('/api/targets', requireAuth, async (req, res) => {
     let username = String(req.body?.username ?? '').trim();
     const note = String(req.body?.note ?? '').trim().slice(0, 200);
 
-    // Si no vino el nombre, lo resolvemos con la cuenta conectada (o con el
-    // último username que hayan dejado sus eventos).
     if (!username) {
-      const client = getClient();
+      const client = bot.getClient(owner);
       if (client?.isReady?.()) {
         const user = await client.users.fetch(userId).catch(() => null);
         if (user) {
-          username = displayName(user);
-          rememberProfile(user);
+          username = bot.displayName(user);
+          bot.rememberProfile(owner, user);
         }
       }
     }
-    if (!username && db.isConfigured()) {
+    if (!username && db.isConfigured() && db.isHealthy()) {
       const { data } = await db
         .getClient()
         .from('events')
         .select('username')
+        .eq('owner', owner)
         .eq('user_id', userId)
         .order('created_at', { ascending: false })
         .limit(1);
       username = data?.[0]?.username ?? '';
     }
 
-    await targets.add(userId, username, note);
-    invalidateSummary();
-    res.json({ ok: true, target: { user_id: userId, username: username || null, note: note || null } });
+    await targets.add(owner, userId, username, note);
+    invalidateSummary(owner);
+    res.json({
+      ok: true,
+      target: {
+        user_id: userId,
+        username: username || null,
+        note: note || null,
+        created_at: new Date().toISOString(),
+      },
+    });
   } catch (error) {
     sendError(res, error);
   }
 });
 
 app.delete('/api/targets/:userId', requireAuth, async (req, res) => {
+  const owner = ownerOf(req);
   try {
     const userId = snowflake(req.params.userId);
     if (!userId) return res.status(400).json({ error: 'ID de Discord inválido' });
-    await targets.remove(userId);
-    invalidateSummary();
+    await targets.remove(owner, userId);
+    invalidateSummary(owner);
     res.json({ ok: true });
   } catch (error) {
     sendError(res, error);
@@ -783,21 +634,14 @@ app.delete('/api/targets/:userId', requireAuth, async (req, res) => {
 });
 
 app.get('/api/guilds', requireAuth, (req, res) => {
-  const client = getClient();
-  const guilds = [...(client?.guilds?.cache?.values() || [])]
-    .map((guild) => ({
-      id: guild.id,
-      name: guild.name,
-      icon: guild.iconURL?.({ size: 64 }) ?? null,
-    }))
-    .sort((a, b) => a.name.localeCompare(b.name));
-  res.json({ guilds });
+  res.json({ guilds: bot.guilds(ownerOf(req)) });
 });
 
 app.get('/api/members', requireAuth, async (req, res) => {
+  const owner = ownerOf(req);
   try {
-    const client = getClient();
-    if (!client?.isReady?.()) return res.status(409).json({ error: 'El bot todavía no está conectado' });
+    const client = bot.getClient(owner);
+    if (!client?.isReady?.()) return res.status(409).json({ error: 'Tu cuenta de Discord todavía no está conectada' });
 
     const guild = client.guilds.cache.get(String(req.query.guild || ''));
     if (!guild) return res.status(404).json({ error: 'Servidor no encontrado' });
@@ -812,7 +656,7 @@ app.get('/api/members', requireAuth, async (req, res) => {
           : await guild.members.fetch({ limit: 100 });
         members = [...fetched.values()];
       } catch {
-        // Sin permiso de member list: seguimos con la cache parcial.
+        // Sin permiso de member list seguimos con la cache parcial.
       }
     }
 
@@ -827,9 +671,9 @@ app.get('/api/members', requireAuth, async (req, res) => {
     res.json({
       members: members.slice(0, 50).map((member) => ({
         id: member.id,
-        username: displayName(member.user),
+        username: bot.displayName(member.user),
         nickname: member.displayName || null,
-        avatar_url: avatarUrl(member.id, member.user?.avatar ?? null),
+        avatar_url: bot.avatarUrl(member.id, member.user?.avatar ?? null),
         bot: Boolean(member.user?.bot),
       })),
     });
@@ -838,17 +682,129 @@ app.get('/api/members', requireAuth, async (req, res) => {
   }
 });
 
+/* --------------------------------------------------------------- cuenta --- */
+
+app.get('/api/settings', requireAuth, (req, res) => {
+  const owner = ownerOf(req);
+  const status = bot.status(owner);
+  status.configured = Boolean(req.auth.account.hasToken) || status.configured;
+  res.json({
+    account: req.auth.account,
+    bot: status,
+    db: dbState(),
+  });
+});
+
+app.put('/api/settings/token', requireAuth, async (req, res) => {
+  const owner = ownerOf(req);
+  try {
+    const token = String(req.body?.token ?? '').trim();
+    if (!token) return res.status(400).json({ error: 'Pegá el token de Discord' });
+
+    const user = await bot.validateToken(token);
+    const record = await accounts.saveDiscord(owner, {
+      token,
+      userId: user.id,
+      username: user.global_name || user.username,
+      avatar: user.avatar,
+    });
+    bot.reconnect(owner);
+    invalidateSummary(owner);
+    targets.refresh(owner, { force: true });
+
+    const status = bot.status(owner);
+    status.configured = true;
+    res.json({
+      ok: true,
+      account: accounts.publicView(record),
+      bot: status,
+    });
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
+app.delete('/api/settings/token', requireAuth, async (req, res) => {
+  const owner = ownerOf(req);
+  try {
+    await accounts.clearDiscord(owner);
+    await bot.stop(owner);
+    invalidateSummary(owner);
+    res.json({ ok: true, account: accounts.publicView(await accounts.getRecord(owner)) });
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
+app.post('/api/bot/reconnect', requireAuth, async (req, res) => {
+  const owner = ownerOf(req);
+  try {
+    bot.reconnect(owner);
+    res.json({ ok: true, bot: bot.status(owner) });
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
+app.post('/api/bot/disconnect', requireAuth, async (req, res) => {
+  const owner = ownerOf(req);
+  await bot.stop(owner);
+  res.json({ ok: true, bot: bot.status(owner) });
+});
+
+app.put('/api/account', requireAuth, async (req, res) => {
+  const owner = ownerOf(req);
+  try {
+    const legacy = settings.accountView();
+    if (legacy.source === 'env' && legacy.username === owner) {
+      return res.status(409).json({
+        error: 'La cuenta viene de DASHBOARD_USERNAME / DASHBOARD_PASSWORD; cambiala en el deploy',
+      });
+    }
+    const result = await accounts.changeAccount(owner, req.body?.current, {
+      password: req.body?.password,
+    });
+    startSession(req, res, result);
+    res.json({ ok: true, username: result.username, account: result });
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
+app.delete('/api/account/hwid', requireAuth, async (req, res) => {
+  const owner = ownerOf(req);
+  try {
+    const view = await accounts.resetHwid(owner, req.body?.password);
+    res.setHeader('Set-Cookie', cookie(req, '', 0));
+    res.json({ ok: true, account: view });
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
 /* ------------------------------------------------------------------ SSE --- */
 
-const streamClients = new Set();
+/** res -> owner. Cada stream recibe solo los eventos de su cuenta. */
+const streamClients = new Map();
 
 queue.on('events', (rows) => {
-  const payload = `data: ${JSON.stringify(rows)}\n\n`;
-  for (const client of streamClients) {
-    try {
-      client.write(payload);
-    } catch {
-      streamClients.delete(client);
+  if (!rows?.length) return;
+  const byOwner = new Map();
+  for (const row of rows) {
+    if (!row?.owner) continue;
+    if (!byOwner.has(row.owner)) byOwner.set(row.owner, []);
+    byOwner.get(row.owner).push(row);
+  }
+  for (const [owner, list] of byOwner) {
+    invalidateSummary(owner);
+    const payload = `data: ${JSON.stringify(list)}\n\n`;
+    for (const [res, clientOwner] of streamClients) {
+      if (clientOwner !== owner) continue;
+      try {
+        res.write(payload);
+      } catch {
+        streamClients.delete(res);
+      }
     }
   }
 });
@@ -861,7 +817,7 @@ app.get('/api/stream', requireAuth, (req, res) => {
     'X-Accel-Buffering': 'no',
   });
   res.write(': connected\n\n');
-  streamClients.add(res);
+  streamClients.set(res, ownerOf(req));
 
   const ping = setInterval(() => res.write(': ping\n\n'), 15_000);
   ping.unref?.();

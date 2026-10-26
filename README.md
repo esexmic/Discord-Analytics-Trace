@@ -2,9 +2,7 @@
 
 **Trace by XYB** · monitor de actividad de Discord sobre una **user token** (cuenta propia): gateway en vivo, persistencia en Supabase y un dashboard web para ver todo. Pensado para seguir a un grupo chico de usuarios objetivo dentro de los servidores donde ya está la cuenta.
 
-La configuración se carga **desde el panel**: token de Discord, claves de Supabase y objetivos. No hace falta editar archivos ni reiniciar el proceso.
-
-![panel](docs/preview.png)
+Es **privado y multiusuario**: cada persona que entra a la web registra su cuenta, pega su propio token de Discord y elige sus objetivos. Nadie ve los eventos de nadie. El panel **no pide Supabase ni keys** — la infraestructura va solo en el entorno del deploy.
 
 ## Qué registra
 
@@ -31,18 +29,20 @@ Los mensajes solo se ven en servidores mutuos (es lo único a lo que la cuenta t
 - Railway para el host — free trial / Hobby
 
 ```
-schema.sql              tablas (targets, events, accounts) + índices + RLS + prune_events
-src/settings.js         API keys, key de registro y configuración en caliente (env + data/settings.json)
-src/accounts.js         cuentas, scrypt, HWID y sesiones (Supabase o data/accounts.json)
+schema.sql              tablas (accounts, targets, events) + índices + RLS + event_stats + prune_events
+src/settings.js         configuración de infraestructura (env + data/settings.json); ya no se edita desde el panel
+src/accounts.js         cuentas, scrypt, HWID, token de Discord por cuenta y sesiones
 src/net.js              fetch con deadline, reintentos y causa real del error
 src/config.js           perillas de arranque (puerto, TRACK_ALL, targets semilla)
 src/db.js               cliente Supabase perezoso + probe + insert batch
-src/targets.js          cache de objetivos (refresh cada 20s, backoff si falla)
+src/targets.js          cache de objetivos por owner (refresh cada 20s, backoff si falla)
 src/queue.js            buffer de escritura (40 eventos / 700ms)
-src/bot.js              gateway: presencia, mensajes, edits, voz, connect/disconnect
-src/server.js           API + auth por cookie + SSE + endpoints de ajustes
+src/bot.js              un gateway por cuenta: presencia, mensajes, edits, voz, connect/disconnect
+src/server.js           API + auth por cookie + bootstrap + SSE
 src/index.js            arranque + shutdown limpio
 public/index.html       dashboard (vanilla, sin build)
+public/app.css          design system del panel
+public/app.js           estado, fetch, SSE y render del panel
 scripts/demo.js         demo con datos falsos, sin credenciales
 scripts/smoke.js        test end-to-end del pipeline
 ```
@@ -53,46 +53,39 @@ scripts/smoke.js        test end-to-end del pipeline
 
 ```bash
 npm install
+cp .env.example .env      # pegá SUPABASE_URL + SUPABASE_SERVICE_KEY
 npm start
 ```
 
-Abrí `http://localhost:3000`. En el primer arranque el panel pide **crear la cuenta** (usuario + contraseña + **key de acceso**); después abre solo la ventana de **Ajustes** para pegar:
+Abrí `http://localhost:3000`. La primera pantalla es **Crear cuenta**: usuario (3–32 caracteres: letras, números, `.` `-` `_`) y contraseña (mínimo 8). No pide key. La primera cuenta que se registra en la base queda como `admin`; las siguientes como `user`.
 
-1. **Discord** → token de la cuenta que mira → *Guardar y conectar*.
-2. **Supabase** → Project URL + secret key → *Guardar* → *Probar conexión*.
-3. **Objetivo** → ID del usuario a seguir → *Agregar objetivo*.
+Después el panel abre con una sola tarjeta:
 
-Todo eso queda guardado en `data/settings.json` (modo 600, fuera del repo). El token y las claves nunca se devuelven completos al navegador: el panel muestra solo un preview (`sb_sec…6POS2-`, `MTU2…_Zfk`).
+1. **Pegar el token** de la cuenta de Discord que va a mirar → queda validado y conectado.
+2. **Fijar el objetivo** → ID del usuario (o elegirlo desde un servidor con el botón *Buscar en un server*).
+3. Ver el feed en vivo.
+
+El token se guarda **por cuenta** en la tabla `accounts` (`discord_token`, `discord_user_id`, `discord_username`, `discord_avatar`). Nunca se devuelve al navegador: la API solo informa `hasToken` y la cuenta resuelta.
 
 ### Precedencia de configuración
 
-`variable de entorno` > `data/settings.json` > vacío.
+`variable de entorno` > `data/settings.json` (vestigio de instalaciones viejas) > vacío.
 
-Si una variable está definida (por ejemplo `DISCORD_TOKEN` en Railway), el panel la muestra en amarillo como *definida por variable de entorno* y no deja pisarla. Es a propósito: en un deploy las env son la verdad.
+Supabase y el secreto de sesión vienen del entorno. En el panel solo se toca lo propio de cada cuenta: token de Discord, contraseña, usuario y dispositivo.
 
-### Cuenta, key de acceso y HWID
+### Cuenta y HWID
 
-Las cuentas viven en la tabla `accounts` de Supabase (con `data/accounts.json` como fallback local). Para **crear una cuenta** hacen falta usuario, contraseña y la **key de acceso**:
+Cada cuenta queda **atada al dispositivo** que la creó: el navegador calcula un identificador estable (`localStorage` + huella) y el server guarda solo su sha256. Un login desde otro equipo devuelve *“Esta cuenta está vinculada a otro dispositivo”*.
 
-- Definila en el deploy con `ACCESS_KEY` (o `REGISTRATION_KEY`). Es la que repartís.
-- Si no la definís, el server genera una y la imprime en el log del arranque (`[auth] ACCESS_KEY generada…`). También la puede revelar un admin desde **Ajustes → Cuenta → Ver key**.
+- Para mover una cuenta de equipo: **Ajustes → Dispositivo → Desvincular** (pide la contraseña) y volver a entrar.
+- Si el equipo original ya no existe, en el login está **“Cambié de dispositivo”**: con usuario + contraseña se reata la cuenta al equipo nuevo. Ese proceso cierra las sesiones viejas.
+- Cambiar la contraseña o desvincular el HWID sube `session_version`, así que las cookies anteriores dejan de valer. El logout además revoca el token firmado en memoria hasta que expira.
 
-Cada cuenta queda **atada al dispositivo** que la creó: el navegador calcula un identificador estable (`localStorage` + huella del navegador) y el server guarda solo su sha256. Un login desde otro dispositivo devuelve *“Esta cuenta está vinculada a otro dispositivo”*.
+`DASHBOARD_USERNAME` / `DASHBOARD_PASSWORD` siguen funcionando como **cuenta legacy del deploy**: entra sin HWID y se migra sola a la tabla `accounts` en el primer login. Su contraseña se cambia en las variables del deploy, no desde el panel.
 
-- Para mover una cuenta de equipo: **Ajustes → Cuenta → Desvincular dispositivo** (pide la contraseña) y volver a entrar.
-- Si el equipo original ya no existe, en el login está **“Cambié de dispositivo”**: con usuario + contraseña + key de acceso se reata la cuenta al equipo nuevo. Ese proceso cierra las sesiones viejas.
-- Cambiar la contraseña o desvincular el HWID sube `session_version`, así que las cookies anteriores dejan de valer.
+### Aislar el deploy
 
-`DASHBOARD_USERNAME` / `DASHBOARD_PASSWORD` siguen funcionando como **cuenta legacy del deploy**: entran sin HWID y se migran solas a la base en el primer login. La contraseña de esa cuenta se cambia en las variables del deploy, no desde el panel. Si no usás esas variables y el disco es efímero, igual no perdés el acceso: las cuentas y el HWID quedan en Supabase (corré `schema.sql`).
-
-### API keys
-
-En **Ajustes → API keys** se crean tokens `xyb_…` para scripts. El token completo se muestra **una sola vez**; el server guarda solo su hash sha256. Se usan con `Authorization: Bearer xyb_…` o `x-api-key: xyb_…`, se pueden revocar y las rutas sensibles (credenciales, cuenta, bot) siguen exigiendo cookie de sesión.
-
-```bash
-curl -H "x-api-key: xyb_..." https://tu-deploy/api/summary
-curl -H "Authorization: Bearer xyb_..." https://tu-deploy/api/events?limit=20
-```
+La web se cierra por registro, no por key: cualquiera que tenga la URL puede crear cuenta, pero cada cuenta solo ve sus propios objetivos y eventos. Si querés restringir quién entra, hacelo afuera del app (Railway Private Networking, Basic Auth en un proxy, o simplemente no repartir la URL y borrar las cuentas que no corresponda desde Supabase). El server ya no tiene API keys ni key de registro.
 
 ## Demo sin credenciales
 
@@ -100,27 +93,29 @@ curl -H "Authorization: Bearer xyb_..." https://tu-deploy/api/events?limit=20
 npm run demo
 ```
 
-Abre `http://localhost:3311`, usuario `admin`, contraseña `demo` (key de registro: `demo-key-1234567890`). Carga 3 objetivos de mentira, eventos de todos los tipos y un mensaje nuevo cada 30s para ver el feed en vivo. No toca Supabase ni Discord.
+Abre `http://localhost:3311`, usuario `admin`, contraseña `demo`. Carga 3 objetivos de mentira, eventos de todos los tipos y un mensaje nuevo cada 30s para ver el feed en vivo. No toca Supabase ni Discord.
 
 ## 1. Supabase
 
 1. Crear proyecto en https://supabase.com (free).
-2. **SQL Editor → New query** → pegar todo `schema.sql` → **Run**.
-3. **Project Settings → API** → copiar:
-   - `Project URL` → se pega en Ajustes → Supabase (o `SUPABASE_URL`).
-   - `service_role` key (secret) → se pega en Ajustes → Supabase (o `SUPABASE_SERVICE_KEY`).
+2. **SQL Editor → New query** → pegar **todo** `schema.sql` → **Run**. El archivo es idempotente: crea lo que falta y hace backfill de las columnas `owner` sobre datos existentes, así que se puede volver a correr sobre una base vieja.
+3. **Project Settings → API** → copiar en `.env`:
+   - `Project URL` → `SUPABASE_URL`
+   - `service_role` key (secret) → `SUPABASE_SERVICE_KEY`
 
-La `service_role` bypassea RLS. No la pongas en el frontend ni en un repo público. La clave pública (`sb_publishable_…`) **no sirve** para el server: RLS está cerrado y el panel la rechaza con un mensaje explícito.
+La `service_role` bypassea RLS. No la pongas en el frontend ni en un repo público. La clave pública (`sb_publishable_…` / anon) **no sirve**: RLS está habilitado con cero policies, así que solo el server lee y escribe.
 
 Si el panel dice *"Falta correr schema.sql"*, faltó el paso 2.
+
+> **Venís de una versión anterior:** hay que volver a correr `schema.sql`. Las tablas ganaron la columna `owner` (targets y eventos), la cuenta guarda su token de Discord y existe el RPC `event_stats`. Sin ese paso el panel muestra el error de schema en el banner superior en vez de quedar mudo.
 
 ## 2. Token de Discord
 
 1. Abrir Discord en el navegador, logueado con la cuenta que va a monitorear.
 2. DevTools (F12) → **Application → Local Storage → https://discord.com** → campo `token`.
-3. Pegarlo en Ajustes → Discord → *Guardar y conectar*.
+3. Pegarlo en la tarjeta de inicio o en **Ajustes → Token de Discord** → *Guardar y conectar*.
 
-El panel valida el token contra `GET /users/@me` antes de conectar y muestra la cuenta resuelta (`tu_cuenta · 123456789012345678`) y la cantidad de servidores. Si el token está vencido o revocado, lo dice ahí mismo.
+El server valida el token contra `GET /users/@me` antes de guardar y muestra la cuenta resuelta (`tu_cuenta · 123456789012345678`) y la cantidad de servidores. Si está vencido o revocado, lo dice ahí mismo: *“Discord rechazó el token: está vencido, revocado o mal copiado”*. Cada cuenta levanta su propio gateway; desconectar una no toca a las demás.
 
 Es una selfbot: va contra los ToS de Discord y la cuenta puede ser baneada. Usá una cuenta secundaria, nunca la principal.
 
@@ -131,7 +126,7 @@ npm install
 npm start
 ```
 
-Dashboard: `http://localhost:3000`. La cuenta se crea en el primer arranque o se define con `DASHBOARD_USERNAME` + `DASHBOARD_PASSWORD`.
+Dashboard: `http://localhost:3000`. Sin Supabase configurado se puede entrar y navegar (cuentas en `data/accounts.json`), pero no se guardan objetivos ni eventos; el panel lo avisa con un banner.
 
 Antes de conectar la cuenta real podés verificar que el pipeline anda:
 
@@ -143,95 +138,99 @@ npm test
 
 Tres formas:
 
-- **Ajustes → Objetivo**: pegar el ID (snowflake, 17–20 dígitos) y una nota. El nombre se resuelve solo si la cuenta está conectada; si no, queda el ID hasta el primer evento.
-- **Sidebar → `+ del server`**: elegir servidor → buscar por nombre → *Agregar*.
-- **`TARGETS`** en el entorno: IDs separados por coma, se suman a los de la DB.
+- **Sidebar → Agregar objetivo**: pegar el ID (snowflake, 17–20 dígitos) y una nota. El nombre se resuelve solo si la cuenta está conectada; si no, queda el ID hasta el primer evento. Se agrega al instante (optimista) y revierte solo si el server rechaza.
+- **Sidebar → Buscar en un server**: elegir servidor → buscar por nombre → *Fijar*. Los que ya seguís aparecen como *Siguiendo*.
+- **`TARGETS`** en el entorno: IDs separados por coma, visibles para todas las cuentas.
 
 El ID se saca con clic derecho en el usuario → *Copiar ID* (con modo desarrollador activado).
 
-Se guardan en la tabla `targets`. Solo los usuarios de esa lista generan eventos, salvo que pongas `TRACK_ALL=true` (loguea todo el mundo en todos los servidores, ojo con el volumen).
+Se guardan en la tabla `targets` con tu `owner`. Solo los usuarios de esa lista generan eventos para tu cuenta, salvo que el deploy ponga `TRACK_ALL=true` (loguea todo el mundo en todos los servidores, ojo con el volumen).
 
-En el panel, click en un objetivo filtra todo el feed por esa persona.
+En el panel, click en un objetivo filtra todo el feed por esa persona; click en el avatar de un evento hace lo mismo.
 
 ## 5. Deploy en Railway
 
 1. Subir el repo a GitHub.
 2. Railway → **New Project → Deploy from GitHub repo**.
-3. Variables (Service → Variables): `DISCORD_TOKEN`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `ACCESS_KEY`, `SESSION_SECRET`. Opcionalmente `DASHBOARD_USERNAME` + `DASHBOARD_PASSWORD` como cuenta legacy de respaldo.
+3. Variables (Service → Variables): `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `SESSION_SECRET`. Opcionalmente `DASHBOARD_USERNAME` + `DASHBOARD_PASSWORD` como cuenta legacy de respaldo.
 4. Railway inyecta `PORT` solo. `railway.json` ya define `npm start`, healthcheck en `/health` y restart on failure.
 5. **Settings → Networking → Generate Domain** para tener URL pública.
 
 No hace falta build step: Nixpacks detecta Node y corre `npm install`.
 
-**Persistencia**: el filesystem de Railway es efímero. Las cuentas, objetivos y eventos viven en Supabase; en `data/` solo quedan las API keys, la configuración cargada desde el panel y la key de registro autogenerada. Si usás el panel para cargar credenciales, montá un **Volume** en `/app/data` (o definí `DATA_DIR`) o pasá todo por variables de entorno. Para que la key de registro sobreviva a los redeploys, definí `ACCESS_KEY`.
+**Persistencia**: el filesystem de Railway es efímero. Cuentas, tokens, objetivos y eventos viven en Supabase; en `data/` solo queda el `session_secret` autogenerado (y las cuentas locales si no usás Supabase). Por eso conviene definir `SESSION_SECRET`: sin él, cada redeploy firma cookies nuevas y todos se quedan fuera hasta volver a entrar.
 
-### Si aparece `TypeError: fetch failed`
+### Si algo anda lento o no carga
 
-El server ahora envuelve todas las llamadas a Supabase con deadline y reintentos, y describe la causa real (`ENOTFOUND`, `EAI_AGAIN`, `ECONNRESET`, timeout). Si el panel muestra *“Base de datos: …”* o los logs dicen `[targets] no se pudo refrescar`:
-
-1. **Ajustes → Supabase → Probar conexión**. El botón pega contra `GET /rest/v1/targets` y distingue URL inválida, key rechazada y tabla faltante.
-2. Verificá que `SUPABASE_URL` sea la **Project URL** (`https://<ref>.supabase.co`), no la conexión directa `db.<ref>.supabase.co` ni el pooler.
-3. Verificá que `SUPABASE_SERVICE_KEY` sea la **service_role** (no la publishable/anon).
-4. Corré `schema.sql` completo: si falta la tabla `accounts` o `targets`, el panel lo dice.
-5. `GET /health` devuelve `db`, `bot` y `targetsError` para ver el estado sin entrar al panel.
+- **`TypeError: fetch failed`**: todas las llamadas a Supabase llevan deadline de 12s, reintentos de conexión y la causa real (`ENOTFOUND`, `EAI_AGAIN`, `ECONNRESET`, timeout). El banner y `GET /health` muestran el estado de la base sin entrar al panel.
+- Verificá que `SUPABASE_URL` sea la **Project URL** (`https://<ref>.supabase.co`), no `db.<ref>.supabase.co` ni el pooler.
+- Verificá que `SUPABASE_SERVICE_KEY` sea la **service_role** (no la publishable/anon). Una key inválida es justamente lo que antes producía `Invalid API key` en cada reintento: hoy el server lo detecta al arrancar y lo reporta como estado de la base, no como error del bot.
+- Corré `schema.sql` completo: si falta una tabla o la columna `owner`, el panel lo dice.
+- `GET /health` devuelve `db` (con `code` y `message`) y la cantidad de targets cacheados.
 
 ---
 
 ## Variables de entorno
 
-Todas son opcionales: sin ninguna, el panel arranca en modo setup.
+Todas son opcionales: sin Supabase, el panel arranca igual y avisa que la base no está configurada.
 
 | Variable | Para qué |
 |---|---|
-| `DISCORD_TOKEN` | user token de la cuenta que mira (bloquea el campo en el panel) |
-| `SUPABASE_URL` | URL del proyecto Supabase |
-| `SUPABASE_SERVICE_KEY` | service_role key |
-| `ACCESS_KEY` | key que se pide para crear cuentas nuevas (si falta se genera y se loguea) |
-| `REGISTRATION_KEY` | alias de `ACCESS_KEY` |
+| `SUPABASE_URL` | URL del proyecto Supabase (Project URL) |
+| `SUPABASE_SERVICE_KEY` | service_role key; el server es el único cliente |
+| `SESSION_SECRET` | firma de la cookie; si falta se genera y se guarda en `data/settings.json` |
 | `DASHBOARD_USERNAME` | cuenta legacy del deploy (por defecto `admin` si hay `DASHBOARD_PASSWORD`) |
 | `DASHBOARD_PASSWORD` | contraseña de la cuenta legacy; entra sin HWID y se migra a la base |
-| `SESSION_SECRET` | firma de la cookie; si falta se genera y se guarda en `data/settings.json` |
 | `PORT` | 3000 por defecto; Railway lo inyecta |
 | `TRACK_ALL` | `true` = loguear todos, no solo los targets |
-| `TARGETS` | IDs extra separados por coma (se suman a la DB) |
+| `TARGETS` | IDs extra separados por coma (se suman para todas las cuentas) |
 | `SELF_PRESENCE` | `online`, `idle`, `dnd` o `invisible` para el estado de la propia cuenta |
 | `ALERT_WEBHOOK` | webhook de Discord: avisa conexión/desconexión, voz y stream |
-| `DATA_DIR` | carpeta de `settings.json` (por defecto `./data`) |
+| `DATA_DIR` | carpeta de `settings.json` y del fallback local (por defecto `./data`) |
+
+No existe `DISCORD_TOKEN` como variable del server: el token es de cada cuenta y se pega en el panel.
 
 ## API
 
+Todo bajo cookie de sesión salvo `/api/login`, `/api/register`, `/api/recover-device`, `/api/session`, `/health`.
+
 | Método | Ruta | Para qué |
 |---|---|---|
-| GET | `/api/setup` | estado del primer arranque (`needsSetup`) |
-| POST | `/api/register` | `{ username, password, key, hwid, hwid_label }` → crear cuenta y cookie |
-| POST | `/api/setup` | alias histórico de `/api/register` |
+| POST | `/api/register` | `{ username, password, hwid, hwid_label }` → crear cuenta y cookie (la primera queda `admin`) |
 | POST | `/api/login` | `{ username, password, hwid, hwid_label }` → cookie firmada 7 días |
-| POST | `/api/recover-device` | `{ username, password, key, hwid }` → reatar la cuenta a otro dispositivo |
-| POST | `/api/logout` | cerrar sesión |
-| GET | `/api/session` | chequear sesión (`authType`), usuario y si falta setup |
-| GET | `/api/registration-key` | ver la key de acceso (solo admin y cookie) |
-| POST | `/api/account` | `{ username, current, password }` → cambiar usuario/contraseña (solo cookie) |
-| DELETE | `/api/account/hwid` | `{ password }` → desvincular el dispositivo y cerrar sesiones (solo cookie) |
-| GET/POST/DELETE | `/api/keys` | crear, listar y revocar API keys (solo cookie) |
-| GET | `/api/settings` | configuración enmascarada + estado del bot (solo cookie) |
-| PUT | `/api/settings` | guardar token/keys/webhook/presencia (reconecta en caliente, solo cookie) |
-| POST | `/api/settings/test` | probar credenciales sin guardarlas (solo cookie) |
-| POST | `/api/bot/connect` | conectar el gateway con el token guardado (solo cookie) |
-| POST | `/api/bot/disconnect` | desconectar el gateway (solo cookie) |
-| GET | `/api/summary` | contadores 24h, estado del bot, presencia, voz, actividad actual y avatares de los objetivos |
-| GET | `/api/events` | `type, guild, user, q, limit, offset` |
-| GET | `/api/stream` | SSE con los eventos nuevos |
-| GET/POST/DELETE | `/api/targets` | gestionar objetivos |
-| GET | `/api/guilds` | servidores de la cuenta |
+| POST | `/api/recover-device` | `{ username, password, hwid, hwid_label }` → reatar la cuenta a otro dispositivo |
+| POST | `/api/logout` | cerrar sesión y revocar el token firmado |
+| GET | `/api/session` | `authed`, usuario, rol, cuenta y estado de la base |
+| GET | `/api/bootstrap` | **una sola request**: cuenta, bot, objetivos, resumen 24h, últimos eventos, cursor, servidores y estado de la DB |
+| GET | `/api/summary` | contadores 24h, presencia, voz, actividad actual y avatares de los objetivos |
+| GET | `/api/events` | `type, guild, user, q, limit, offset` — siempre filtrado por owner |
+| GET | `/api/stream` | SSE con los eventos nuevos de **tu** cuenta |
+| GET | `/api/targets` | listar objetivos propios |
+| POST | `/api/targets` | `{ user_id, note }` → upsert idempotente |
+| DELETE | `/api/targets/:userId` | quitar un objetivo propio |
+| GET | `/api/guilds` | servidores de la cuenta conectada |
 | GET | `/api/members` | `guild, q` → buscar miembros |
-| GET | `/health` | healthcheck para Railway |
+| GET | `/api/settings` | cuenta, estado del bot y estado de la DB |
+| PUT | `/api/settings/token` | `{ token }` → valida, guarda y reconecta el gateway de esa cuenta |
+| DELETE | `/api/settings/token` | olvidar el token y apagar el gateway de esa cuenta |
+| POST | `/api/bot/reconnect` | reconectar el gateway propio |
+| POST | `/api/bot/disconnect` | desconectar el gateway propio |
+| PUT | `/api/account` | `{ current, username?, password? }` → cambiar usuario/contraseña (sube `session_version`) |
+| DELETE | `/api/account/hwid` | `{ password }` → desvincular el dispositivo y cerrar sesiones |
+| GET | `/health` | healthcheck para Railway (`db`, `targets`) |
+| GET | `/api/health` | ping sin autenticar |
+
+No hay `/api/keys`, `/api/registration-key` ni `/api/settings/test`: se borraron y el server responde 404 (lo cubre el smoke test).
 
 ## Notas técnicas
 
-- **Configuración en caliente**: guardar credenciales desde el panel reconstruye el cliente de Supabase y reconecta el gateway sin reiniciar el proceso. Los errores de conexión se muestran en el diálogo, no en la consola.
+- **Una carga, una request**: el panel arranca con `/api/bootstrap` en vez de seis llamadas encadenadas. El resumen 24h sale de un solo RPC (`event_stats`) y se cachea por owner; los contadores del feed y de la barra lateral se actualizan en local desde el SSE sin volver a pedir.
+- **Sin acciones canceladas**: el feed y la búsqueda de miembros usan `AbortController` + secuencia monótona, así una respuesta vieja no pisa una nueva. Es la causa de los “movimientos que se cancelaban”.
+- **Escritura optimista**: fijar o quitar un objetivo se refleja al instante y revierte solo si el server rechaza.
 - **Batch de escritura**: los eventos se agrupan (40 por lote / 700ms) antes de tocar Supabase. Si la DB falla, el lote se reintenta cada 3s hasta 5 veces; la cola tiene techo de 5000 para no comerse la RAM.
+- **Multi-tenant**: `targets` y `events` llevan `owner`; el runtime del bot (cachés de presencia, voz y perfil) es uno por cuenta, y el SSE enruta por owner. Un usuario no puede leer los eventos de otro ni por ID.
 - **Transiciones reales**: presencia y voz salen de packets crudos (`PRESENCE_UPDATE`, `VOICE_STATE_UPDATE`), con un Map de estado anterior. La misma conexión llega una vez por cada guild en común y se loguea una sola vez.
-- **Edits sin cache**: cuando llega un `messageUpdate` sin contenido viejo, se busca el original en `events` por `message_id`. Por eso también funciona después de un reinicio del bot. Si el original es anterior al bot, queda `metadata.original_known = false`.
+- **Edits sin cache**: cuando llega un `messageUpdate` sin contenido viejo, se busca el original en `events` por `message_id` y **solo dentro del owner**. Por eso funciona después de un reinicio del bot. Si el original es anterior al bot, queda `metadata.original_known = false`.
 - **Voz con duración**: al salir o moverse se calcula cuánto estuvo en el canal desde el join.
 - **Perfil con baseline**: `USER_UPDATE` y `GUILD_MEMBER_UPDATE` llegan sin el estado anterior, así que el bot guarda en memoria el último perfil visto por usuario (y el apodo por servidor). Al conectar siembra ese baseline desde la cache, y en cada packet emite un solo `profile_update` con `metadata.changes`, `before`, `after`, `source` e `initial`. Los avatares/banners animados (`a_…`) se resuelven como `.gif`; sin avatar se usa el default que corresponde al id.
 - **Presencia al arranque**: se siembra el estado actual desde la cache de guilds, así el panel muestra quién está online sin esperar a que cambie.
@@ -239,6 +238,6 @@ Todas son opcionales: sin ninguna, el panel arranca en modo setup.
   ```sql
   select cron.schedule('prune-events', '0 3 * * *', $$select prune_events(90)$$);
   ```
-- **Seguridad del dashboard**: cookie HMAC HttpOnly (+ `Secure` detrás de HTTPS) con `session_version` revocable, contraseñas con scrypt + salt, HWID como sha256, API keys hasheadas con sha256 y visibles una sola vez, rate limit de intentos fallidos (10/min por IP), `noindex`, secretos enmascarados en la API.
+- **Seguridad del dashboard**: cookie HMAC HttpOnly (+ `Secure` detrás de HTTPS) con `session_version` revocable y revocación en memoria al logout, contraseñas con scrypt + salt, HWID como sha256, rate limit de intentos fallidos (12/min por IP), `robots.txt` con `Disallow: /`, token de Discord y hashes fuera de toda respuesta de la API.
 - **Red resiliente**: `src/net.js` pone deadline de 12s y reintenta solo conexiones que todavía no se establecieron (no duplica escrituras). `targets.refresh` entra en backoff de 30s tras un fallo y el panel muestra el error real en vez de quedar mudo.
 - **Webhook opcional**: `ALERT_WEBHOOK` manda un mensaje a un webhook de Discord en cada conexión/desconexión, entrada/salida de voz y stream.

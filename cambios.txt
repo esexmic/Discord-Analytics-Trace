@@ -6,7 +6,9 @@ colores, tipografía, pantallas, avatares y animaciones. La idea es que en el
 futuro estos valores se puedan editar desde una página web sin descargar nada;
 acá queda anotado dónde vive cada uno para exponerlos después.
 
-Ruta base: public/index.html (todo el CSS y el JS del panel están inline).
+Ruta base: public/index.html (markup), public/app.css (design system) y
+public/app.js (estado, fetch, SSE y render). Desde v1.4 el panel ya no tiene
+CSS ni JS inline.
 Imagen de marca: public/logo.jpg (original en logo/logo.jpg).
 
 
@@ -145,3 +147,49 @@ PENDIENTE PARA LA PÁGINA WEB FUTURA
 - Exponer la curva de animación y si se respeta reduced-motion.
 - Guardar todo en data/settings.json o en una tabla de Supabase, con preview
   en vivo antes de aplicar.
+
+------------------------------------------------------------
+v1.4 — 26/10/2026
+------------------------------------------------------------
+
+ARCHIVOS
+- El panel se parte en tres: public/index.html (markup), public/app.css y
+  public/app.js. Nada de CSS/JS inline ni de fetch armados en el HTML.
+- Sin fuentes ni assets externos: system-ui, logo local, cero peticiones de red
+  salvo la API propia.
+
+DISEÑO
+- Design system en :root: --bg, --bg-2, --panel, --panel-2, --line, --line-2,
+  --text, --muted, --muted-2, --accent, --accent-2, --accent-soft, --green,
+  --red, --amber, --cyan, --purple, --r/--r-sm/--r-xs, --mono, --ease, --shadow.
+- Layout de tres zonas: sidebar (cuenta + objetivos), main (stats, toolbar,
+  chips, feed) y dialogs (ajustes, buscador de servers).
+- Breakpoints 1020 / 860 / 480: la sidebar pasa a drawer con scrim y aparece
+  una tabbar fija abajo con el contador y el estado en vivo.
+- Tarjetas de evento con icono por tipo, avatar con fallback al default de
+  Discord por id, diffs para edit (antes rayado, después destacado) y pills
+  para presencia/dispositivo.
+- Skeletons en el feed y en la barra lateral mientras carga el bootstrap;
+  dialogs con @starting-style para la entrada; todo respeta
+  prefers-reduced-motion.
+
+QUÉ SE LLEVÓ PUESTO
+- Pantalla de configuración de Supabase, campo de URL/keys y botón "Probar
+  conexión": la infraestructura ahora es solo del deploy (variables de entorno).
+- Key de acceso en el registro, campo "repetir key", fila "Ver key" en Ajustes
+  y toda la sección API keys (crear, copiar, revocar).
+- Registro abierto: se entra con usuario + contraseña y nada más. La primera
+  cuenta queda como admin.
+
+FLUJO NUEVO
+- Boot: login/registro → tarjeta de "pegá tu token de Discord" → fijar
+  objetivo → feed. Tres pasos, todos en la misma pantalla.
+- Objetivos optimistas: se dibujan al click y revierten solo si la API rechaza.
+- Feed y búsqueda de miembros con AbortController + secuencia, así una
+  respuesta vieja no pisa una nueva.
+- Contadores de la barra lateral actualizados en local desde el SSE, sin
+  request extra por evento.
+
+PENDIENTE PARA LA PÁGINA WEB FUTURA
+- (se mantiene la lista de v1.3; ahora los tokens viven en public/app.css en
+  vez de inline)

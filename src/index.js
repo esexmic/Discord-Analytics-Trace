@@ -1,53 +1,33 @@
 'use strict';
 
 const { startServer } = require('./server');
-const { startBot, stopBot } = require('./bot');
+const bot = require('./bot');
 const queue = require('./queue');
-const settings = require('./settings');
 const db = require('./db');
 
 const server = startServer();
 let stopping = false;
 
-async function bootBot(attempt = 1) {
-  const { discordToken } = settings.get();
-
-  if (!discordToken) {
-    console.log('[bot] sin token de Discord: abrí el panel y pegalo en Ajustes → Discord');
-    return;
+async function boot() {
+  const result = await db.init();
+  if (!result.ok) {
+    console.error(`[db] ${result.code || 'db_unavailable'}: ${result.message}`);
+    console.error('[db] el panel arranca igual; revisá la configuración y reiniciá el deploy');
+  } else {
+    console.log(`[db] Supabase OK${result.source ? ` (${result.source})` : ''}`);
   }
 
   try {
-    await startBot();
+    const count = await bot.startAll();
+    if (count) console.log(`[bot] ${count} cuenta(s) con token para conectar`);
   } catch (error) {
-    console.error(`[bot] intento ${attempt} falló:`, error.message);
-    if (error.code === 'invalid_token') {
-      console.error('[bot] el token no sirve: pegalo de nuevo desde el panel');
-      return;
-    }
-    if (attempt >= 5) {
-      console.error('[bot] no se pudo conectar después de 5 intentos, revisá el token');
-      process.exitCode = 1;
-      return;
-    }
-    const delay = Math.min(60_000, 5_000 * attempt);
-    console.log(`[bot] reintento en ${Math.round(delay / 1000)}s...`);
-    setTimeout(() => void bootBot(attempt + 1), delay).unref?.();
+    console.error('[bot] no se pudieron reconectar las cuentas:', error.message);
   }
 }
 
-if (!db.isConfigured()) {
-  console.log('[app] Supabase sin configurar: el panel arranca en modo setup');
-}
-
-// Sin ACCESS_KEY la key de registro vive en el disco (efímero en Railway).
-// Dejarla en el log permite crear la primera cuenta aunque el panel todavía
-// no tenga admin. Con ACCESS_KEY definida no se imprime nada.
-if (!process.env.ACCESS_KEY && !process.env.REGISTRATION_KEY) {
-  console.log(`[auth] key de acceso para crear cuentas: ${settings.registrationKey()}`);
-}
-
-void bootBot();
+void boot().catch((error) => {
+  console.error('[app] arranque incompleto:', error.message);
+});
 
 async function shutdown(signal) {
   if (stopping) return;
@@ -55,9 +35,9 @@ async function shutdown(signal) {
   console.log(`[app] ${signal} recibido, cerrando limpio...`);
 
   try {
-    await stopBot();
+    await bot.stopAll();
   } catch {
-    // el gateway ya estaba caído
+    // los gateways ya estaban caídos
   }
 
   try {

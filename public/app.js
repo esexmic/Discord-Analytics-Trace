@@ -1,0 +1,1551 @@
+'use strict';
+
+/* ------------------------------------------------------------------ dom -- */
+
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, text) => {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined) node.textContent = text;
+  return node;
+};
+const show = (node, on) => node.classList.toggle('hidden', !on);
+const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => (
+  { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+));
+
+/* --------------------------------------------------------------- estado -- */
+
+const state = {
+  account: null,
+  bot: null,
+  db: null,
+  targets: [],
+  events: [],
+  guilds: [],
+  summary: null,
+  next: null,
+  fetched: 0,
+  type: '',
+  guild: '',
+  user: '',
+  q: '',
+  paused: false,
+  source: null,
+  streamDownSince: 0,
+  feedSeq: 0,
+  feedController: null,
+  feedLoading: false,
+  memberSeq: 0,
+  memberController: null,
+  authMode: 'login',
+  recover: false,
+  hwid: '',
+  botTimer: 0,
+  botBusy: false,
+  wasConnected: false,
+  toastTimer: 0,
+  dbToastAt: 0,
+  hwidReady: false,
+};
+
+const EVENT_TYPES = [
+  'message', 'message_edit', 'message_delete',
+  'voice_join', 'voice_leave', 'voice_move', 'voice_stream', 'voice_camera',
+  'presence', 'profile_update',
+];
+
+/* ------------------------------------------------------------------ api -- */
+
+class ApiError extends Error {
+  constructor(message, status, code) {
+    super(message);
+    this.status = status;
+    this.code = code;
+  }
+}
+
+async function api(path, options = {}) {
+  const init = {
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    signal: options.signal,
+    ...options,
+  };
+  if (init.body !== undefined && typeof init.body !== 'string') {
+    init.body = JSON.stringify(init.body);
+  }
+
+  let response;
+  try {
+    response = await fetch(path, init);
+  } catch (error) {
+    if (error.name === 'AbortError') throw error;
+    throw new ApiError('Sin conexión con el servidor', 0, 'network');
+  }
+
+  let data = null;
+  const text = await response.text();
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = null;
+    }
+  }
+
+  if (!response.ok) {
+    throw new ApiError(data?.error || `Error ${response.status}`, response.status, data?.code || null);
+  }
+  return data || {};
+}
+
+/* ----------------------------------------------------------------- toast -- */
+
+function toast(message, kind) {
+  const node = $('toast');
+  node.textContent = message;
+  node.classList.toggle('is-bad', kind === 'bad');
+  node.classList.add('is-on');
+  clearTimeout(state.toastTimer);
+  state.toastTimer = setTimeout(() => node.classList.remove('is-on'), 2600);
+}
+
+/* ------------------------------------------------------------------ hwid -- */
+
+/**
+ * Identidad del dispositivo: UUID de localStorage + huella del equipo,
+ * pasada por SHA-256. Se calcula una sola vez por sesión y sólo cuando hace
+ * falta (login, alta, recuperación), nunca en el arranque del panel.
+ */
+async function deviceHwid() {
+  if (state.hwid) return state.hwid;
+
+  let id = '';
+  try {
+    id = localStorage.getItem('xyb_device_id') || '';
+    if (!id) {
+      id = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      localStorage.setItem('xyb_device_id', id);
+    }
+  } catch {
+    id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  }
+
+  const raw = [
+    id,
+    navigator.userAgent,
+    navigator.language,
+    screen.width,
+    screen.height,
+    screen.colorDepth,
+    Intl.DateTimeFormat().resolvedOptions().timeZone,
+    navigator.hardwareConcurrency || 0,
+    navigator.deviceMemory || 0,
+    navigator.platform || '',
+  ].join('|');
+
+  if (crypto.subtle) {
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(raw));
+    state.hwid = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  } else {
+    let hash = 2166136261;
+    for (let i = 0; i < raw.length; i += 1) {
+      hash ^= raw.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    state.hwid = (hash >>> 0).toString(16).padStart(8, '0').repeat(8);
+  }
+  state.hwidReady = true;
+  return state.hwid;
+}
+
+function deviceLabel() {
+  const os = /Windows/i.test(navigator.platform || '') ? 'Windows'
+    : /Mac|iPhone|iPad/i.test(navigator.platform || '') ? 'Apple'
+      : /Linux/i.test(navigator.platform || '') ? 'Linux' : 'Navegador';
+  const browser = /Edg\//.test(navigator.userAgent) ? 'Edge'
+    : /Firefox\//.test(navigator.userAgent) ? 'Firefox'
+      : /Chrome\//.test(navigator.userAgent) ? 'Chrome' : 'Navegador';
+  return `${os} · ${browser}`;
+}
+
+/* ----------------------------------------------------------------- time -- */
+
+function timeAgo(iso) {
+  const then = Date.parse(iso);
+  if (!Number.isFinite(then)) return '';
+  const diff = Math.max(0, Date.now() - then);
+  const min = Math.floor(diff / 60000);
+  if (min < 1) return 'ahora';
+  if (min < 60) return `hace ${min}m`;
+  const hour = Math.floor(min / 60);
+  if (hour < 24) return `hace ${hour}h`;
+  const day = Math.floor(hour / 24);
+  if (day < 7) return `hace ${day}d`;
+  return new Date(then).toLocaleDateString();
+}
+
+function clockTime(iso) {
+  const then = Date.parse(iso);
+  if (!Number.isFinite(then)) return '';
+  return new Date(then).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function debounce(fn, ms) {
+  let timer = 0;
+  return (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), ms);
+  };
+}
+
+function snowflake(value) {
+  const id = String(value || '').trim();
+  return /^\d{17,20}$/.test(id) ? id : null;
+}
+
+function typeMatches(eventType, filter) {
+  const type = String(eventType || '');
+  if (!filter) return true;
+  if (filter === 'voice') return type.startsWith('voice');
+  if (filter === 'message') return type === 'message' || type.startsWith('message_');
+  return type === filter;
+}
+
+/* ----------------------------------------------------------------- avata -- */
+
+function initials(name) {
+  const clean = String(name || '?').trim();
+  if (!clean) return '?';
+  const parts = clean.split(/[\s_.\-]+/).filter(Boolean);
+  return (parts[0][0] + (parts[1]?.[0] || '')).toUpperCase();
+}
+
+function avatarInto(box, src, name) {
+  const img = box.querySelector('img') || el('img');
+  box.replaceChildren();
+  if (src) {
+    img.alt = '';
+    img.hidden = false;
+    img.src = src;
+    img.onerror = () => { img.hidden = true; box.textContent = initials(name); };
+    box.append(img);
+  } else {
+    box.textContent = initials(name);
+  }
+}
+
+/* ---------------------------------------------------------------- auth --- */
+
+const authForm = $('auth-card');
+
+function setAuthMode(mode) {
+  state.authMode = mode;
+  state.recover = false;
+  $('auth-title').textContent = mode === 'login' ? 'Iniciar sesión' : 'Crear cuenta';
+  $('auth-sub').textContent = mode === 'login'
+    ? 'Tu cuenta, tu token, tu panel.'
+    : 'Elegí usuario y contraseña. Después pegás tu token y listo.';
+  $('auth-submit').textContent = mode === 'login' ? 'Entrar' : 'Crear cuenta';
+  $('auth-repeat-wrap').classList.toggle('hidden', mode !== 'register');
+  $('auth-recover-toggle').classList.toggle('hidden', mode !== 'login');
+  $('auth-password').setAttribute('autocomplete', mode === 'login' ? 'current-password' : 'new-password');
+  for (const b of $('auth-tabs').children) b.classList.toggle('is-on', b.dataset.mode === mode);
+  authForm.reset();
+  setAuthError('');
+}
+
+function setRecoverMode(on) {
+  state.recover = on;
+  $('auth-title').textContent = on ? 'Cambié de dispositivo' : 'Iniciar sesión';
+  $('auth-sub').textContent = on
+    ? 'Confirmá usuario y contraseña y vinculamos esta máquina.'
+    : 'Tu cuenta, tu token, tu panel.';
+  $('auth-submit').textContent = on ? 'Vincular dispositivo' : 'Entrar';
+  $('auth-tabs').classList.toggle('hidden', on);
+  $('auth-recover-toggle').classList.toggle('hidden', on);
+  setAuthError('');
+}
+
+function setAuthError(message, hint) {
+  $('auth-error').textContent = message || '';
+  $('auth-device').textContent = hint || '';
+}
+
+async function submitAuth(event) {
+  event.preventDefault();
+  const username = $('auth-username').value.trim();
+  const password = $('auth-password').value;
+
+  if (state.authMode === 'register' && password !== $('auth-repeat').value) {
+    setAuthError('Las contraseñas no coinciden');
+    return;
+  }
+
+  const button = $('auth-submit');
+  button.disabled = true;
+  setAuthError('');
+
+  try {
+    const hwid = await deviceHwid();
+    const body = { username, password, hwid, hwid_label: deviceLabel() };
+    const path = state.recover ? '/api/recover-device'
+      : state.authMode === 'register' ? '/api/register' : '/api/login';
+    const account = await api(path, { method: 'POST', body });
+    enterApp(account.account || account);
+  } catch (error) {
+    if (error.code === 'hwid_mismatch') {
+      setRecoverMode(true);
+      setAuthError(error.message, 'Completá usuario y contraseña para vincular este equipo.');
+    } else {
+      setAuthError(error.message);
+    }
+  } finally {
+    button.disabled = false;
+  }
+}
+
+$('auth-tabs').addEventListener('click', (event) => {
+  const button = event.target.closest('[data-mode]');
+  if (button) setAuthMode(button.dataset.mode);
+});
+$('auth-recover-toggle').addEventListener('click', () => setRecoverMode(true));
+authForm.addEventListener('submit', submitAuth);
+
+/* -------------------------------------------------------------- render --- */
+
+function botState() {
+  const bot = state.bot || {};
+  if (bot.connected) return { cls: 'dot--live', label: bot.username || 'Conectado' };
+  if (bot.connecting) return { cls: 'dot--wait', label: 'Conectando…' };
+  if (bot.configured) return { cls: 'dot--down', label: bot.error || 'Desconectado' };
+  return { cls: '', label: 'Sin token' };
+}
+
+function renderBot() {
+  const bot = state.bot || {};
+  const view = botState();
+  $('bot-dot').className = `dot ${view.cls}`;
+  $('bot-name').textContent = bot.username || (bot.configured ? 'Conectando…' : 'Sin cuenta de Discord');
+  const meta = bot.connected
+    ? `${bot.guilds || 0} servidor${bot.guilds === 1 ? '' : 'es'} · en vivo`
+    : bot.error || (bot.configured ? 'Estableciendo la sesión…' : 'Pegá tu token para empezar');
+  $('bot-meta').textContent = meta;
+  avatarInto($('bot-avatar'), bot.avatar_url, bot.username || '?');
+}
+
+function renderAccount() {
+  const account = state.account || {};
+  const discord = account.discord || {};
+  $('set-discord-desc').textContent = discord.linked
+    ? `Vinculado a ${discord.username || discord.user_id || 'tu cuenta'}. El token no se devuelve al navegador.`
+    : 'Sin conectar. Pegá el token y queda guardado solo en tu cuenta.';
+  $('set-hwid-desc').textContent = account.hwid_linked
+    ? `Vinculado a ${account.hwid_label || 'un dispositivo'}.`
+    : 'Sin dispositivo vinculado.';
+  $('set-meta').textContent = `@${account.username || '—'} · rol ${account.role || 'user'} · último acceso ${
+    account.last_login_at ? timeAgo(account.last_login_at) : '—'}`;
+  show($('onboarding'), !discord.linked && !state.bot?.configured);
+}
+
+function renderTargets() {
+  const list = $('targets');
+  list.replaceChildren();
+
+  if (!state.targets.length) {
+    list.append(el('div', 'hint', 'Todavía no fijaste nadie. Pegá un ID de Discord o elegí un miembro del servidor.'));
+  }
+
+  for (const target of state.targets) {
+    const userId = String(target.user_id);
+    const row = el('div', 'target');
+    if (state.user === userId) row.classList.add('is-active');
+    if (target.pending) row.classList.add('is-pending');
+    row.dataset.user = userId;
+    row.tabIndex = 0;
+
+    const avatar = el('div', 'target__avatar');
+    avatarInto(avatar, target.avatar_url || (state.summary?.avatars || {})[userId], target.username || userId);
+
+    const main = el('div', 'target__main');
+    main.append(el('div', 'target__name', target.username || userId));
+    main.append(el('div', 'target__meta', target.note ? `${userId} · ${target.note}` : userId));
+    const activity = targetActivity(userId);
+    if (activity) main.append(activity);
+
+    const on = el('span', 'target__on');
+    if (isOnline((state.summary?.presence || {})[userId])) on.classList.add('is-on');
+
+    const remove = el('button', 'target__x', '✕');
+    remove.type = 'button';
+    remove.title = 'Dejar de seguir';
+    remove.dataset.remove = userId;
+
+    row.append(avatar, main, on, remove);
+    list.append(row);
+  }
+
+  const count = String(state.targets.length);
+  $('target-count').textContent = count;
+  $('tabbar-count').textContent = count;
+}
+
+function isOnline(status) {
+  return status === 'online' || status === 'idle' || status === 'dnd';
+}
+
+function targetActivity(userId) {
+  const summary = state.summary || {};
+  const node = el('div', 'target__activity');
+  const bits = [];
+
+  const voice = summary.voice?.[userId];
+  if (voice?.channel_name || voice?.channel) {
+    bits.push(el('span', 'voice', `en ${voice.channel_name || voice.channel}`));
+  }
+  const extras = [];
+  if (voice?.streaming) extras.push('stream');
+  if (voice?.camera) extras.push('cámara');
+  if (extras.length) bits.push(el('span', 'device', extras.join(' + ')));
+
+  if (!bits.length) {
+    const details = summary.activity?.[userId];
+    const label = Array.isArray(details?.activities)
+      ? details.activities.map((activity) => activity?.name).filter(Boolean).join(' · ')
+      : String(details || '');
+    if (label) bits.push(el('span', '', label));
+  }
+
+  if (!bits.length) return null;
+  node.append(...bits);
+  return node;
+}
+
+function renderStats() {
+  const summary = state.summary || {};
+  $('stat-online').textContent = String(summary.online ?? 0);
+  $('stat-targets').textContent = String(state.targets.length);
+  $('stat-events').textContent = String(summary.total24h ?? 0);
+  const voice = Object.keys(summary.voice || {}).length;
+  $('stat-voice').textContent = String(voice);
+}
+
+function renderDb() {
+  const db = state.db || {};
+  const bad = db.configured && db.ok === false;
+  const missing = db.configured === false;
+  if (!bad && !missing) {
+    show($('db-banner'), false);
+    return;
+  }
+  $('db-banner').textContent = missing
+    ? 'La base todavía no está configurada en el servidor. Avisale al dueño del panel.'
+    : `Base sin respuesta: ${db.message || 'reintentando solo'}. Los eventos nuevos se encolan.`;
+  show($('db-banner'), true);
+
+  const now = Date.now();
+  if (now - state.dbToastAt > 60_000) {
+    state.dbToastAt = now;
+    toast('Problema con la base, se reintenta solo', 'bad');
+  }
+}
+
+/* -------------------------------------------------------------- eventos -- */
+
+const TYPES = {
+  message: { icon: '✉', cls: 'message', verb: 'escribió' },
+  message_edit: { icon: '✎', cls: 'edit', verb: 'editó' },
+  message_delete: { icon: '✕', cls: 'delete', verb: 'borró' },
+  voice_join: { icon: '🎙', cls: 'voice', verb: 'entró a voice' },
+  voice_leave: { icon: '⏏', cls: 'voice', verb: 'salió de voice' },
+  voice_move: { icon: '⇄', cls: 'voice', verb: 'se movió de canal' },
+  voice_stream: { icon: '▶', cls: 'voice', verb: 'cambió el stream' },
+  voice_camera: { icon: '◉', cls: 'voice', verb: 'cambió la cámara' },
+  presence: { icon: '●', cls: 'presence', verb: 'cambió de estado' },
+  profile_update: { icon: '☺', cls: 'profile', verb: 'actualizó el perfil' },
+};
+
+const STATUS = {
+  online: { label: 'en línea', cls: 'online' },
+  idle: { label: 'ausente', cls: 'idle' },
+  dnd: { label: 'no molestar', cls: 'dnd' },
+  offline: { label: 'desconectado', cls: 'offline' },
+  unknown: { label: 'desconocido', cls: '' },
+  desconocido: { label: 'desconocido', cls: '' },
+};
+
+const DEVICE_LABELS = { desktop: 'escritorio', mobile: 'móvil', web: 'navegador' };
+
+function formatDuration(seconds) {
+  const value = Number(seconds);
+  if (!Number.isFinite(value) || value < 1) return '';
+  const min = Math.floor(value / 60);
+  if (min < 1) return `${Math.floor(value)}s`;
+  if (min < 60) return `${min} min`;
+  const hour = Math.floor(min / 60);
+  return `${hour} h ${min % 60} min`;
+}
+
+const CDN = 'https://cdn.discordapp.com';
+
+function defaultAvatar(userId) {
+  let index = 0;
+  try { index = Number((BigInt(userId) >> 22n) % 6n); } catch { index = 0; }
+  return `${CDN}/embed/avatars/${index}.png`;
+}
+
+function avatarFor(userId) {
+  return state.avatars?.[userId]
+    || state.summary?.avatars?.[userId]
+    || (userId ? defaultAvatar(userId) : '');
+}
+
+function bodyNode(text, clamp) {
+  const node = el('div', 'ev__body', text);
+  if (clamp && text.length > 280) node.classList.add('clamped');
+  if (node.classList.contains('clamped')) {
+    node.addEventListener('click', () => node.classList.toggle('clamped'), { once: false });
+  }
+  return node;
+}
+
+function strongAfter(prefix, name, suffix) {
+  const node = el('div', 'ev__body');
+  node.append(document.createTextNode(prefix));
+  node.append(el('strong', null, name));
+  if (suffix) node.append(document.createTextNode(suffix));
+  return node;
+}
+
+function diffRow(kind, label, value) {
+  const row = el('div', `diff__row diff__row--${kind}`);
+  row.append(el('span', 'diff__tag', label));
+  row.append(document.createTextNode(value));
+  return row;
+}
+
+function pill(status) {
+  const info = STATUS[status] || { label: status || '—', cls: '' };
+  return el('span', `pill${info.cls ? ` pill--${info.cls}` : ''}`, info.label);
+}
+
+function profileBody(event) {
+  const meta = event.metadata || {};
+  const before = meta.before || null;
+  const after = meta.after || null;
+  const changes = meta.changes || {};
+  const wrap = el('div', 'pf');
+
+  if (meta.initial) {
+    const row = el('div', 'pf__row');
+    row.append(el('span', 'pf__label', 'detectado'));
+    if (after?.avatar_url) {
+      const img = el('img', 'pf__img pf__img--avatar');
+      img.src = after.avatar_url;
+      img.loading = 'lazy';
+      img.alt = '';
+      row.append(img);
+    }
+    row.append(el('span', 'pf__new', after?.display || event.username || event.user_id));
+    if (after?.banner_url) {
+      const img = el('img', 'pf__img pf__img--banner');
+      img.src = after.banner_url;
+      img.loading = 'lazy';
+      img.alt = '';
+      row.append(img);
+    }
+    wrap.append(row);
+    return wrap;
+  }
+
+  const nameRow = (label, change) => {
+    const row = el('div', 'pf__row');
+    row.append(el('span', 'pf__label', label));
+    row.append(el('span', 'pf__old', change.from ?? '—'));
+    row.append(el('span', 'arrow', '→'));
+    row.append(el('span', 'pf__new', change.to ?? '—'));
+    return row;
+  };
+
+  const mediaRow = (label, beforeUrl, afterUrl, kind) => {
+    const row = el('div', 'pf__row');
+    row.append(el('span', 'pf__label', label));
+    const thumb = (url) => {
+      if (url) {
+        const img = el('img', `pf__img pf__img--${kind}`);
+        img.src = url;
+        img.loading = 'lazy';
+        img.alt = '';
+        return img;
+      }
+      return el('span', 'pf__none', `sin ${label}`);
+    };
+    row.append(thumb(beforeUrl), el('span', 'arrow', '→'), thumb(afterUrl));
+    return row;
+  };
+
+  if (changes.username) wrap.append(nameRow('nombre', changes.username));
+  if (changes.global_name) wrap.append(nameRow('display', changes.global_name));
+  if (meta.nick) wrap.append(nameRow('apodo', meta.nick));
+  if (changes.avatar) wrap.append(mediaRow('avatar', before?.avatar_url, after?.avatar_url, 'avatar'));
+  if (changes.banner) wrap.append(mediaRow('banner', before?.banner_url, after?.banner_url, 'banner'));
+
+  return wrap.childElementCount ? wrap : null;
+}
+
+function eventBody(event) {
+  const meta = event.metadata || {};
+
+  switch (event.event_type) {
+    case 'message':
+      return bodyNode(event.content || '[sin texto]', true);
+
+    case 'message_edit': {
+      const wrap = el('div', 'diff');
+      const before = event.old_content
+        || (meta.original_known === false ? '(original no capturado)' : '(vacío)');
+      wrap.append(diffRow('old', 'antes', before));
+      wrap.append(diffRow('new', 'después', event.content || '(vacío)'));
+      return wrap;
+    }
+
+    case 'message_delete': {
+      const wrap = el('div', 'diff');
+      wrap.append(diffRow('old', 'borrado', event.content || '(sin texto)'));
+      return wrap;
+    }
+
+    case 'voice_join':
+      return strongAfter('Entró a ', event.channel_name || event.channel_id || '—');
+
+    case 'voice_leave': {
+      const stayed = formatDuration(meta.seconds);
+      return strongAfter('Salió de ', event.channel_name || event.channel_id || '—',
+        stayed ? ` después de ${stayed}` : '');
+    }
+
+    case 'voice_move': {
+      const node = el('div', 'ev__body');
+      node.append(document.createTextNode('De '), el('strong', null, meta.from_name || meta.from || '—'),
+        document.createTextNode(' a '), el('strong', null, event.channel_name || event.channel_id || '—'));
+      return node;
+    }
+
+    case 'voice_stream':
+      return bodyNode(meta.streaming ? 'Empezó a transmitir' : 'Dejó de transmitir');
+
+    case 'voice_camera':
+      return bodyNode(meta.camera ? 'Encendió la cámara' : 'Apagó la cámara');
+
+    case 'profile_update':
+      return profileBody(event);
+
+    case 'presence': {
+      const row = el('div', 'ev__head');
+      row.style.marginTop = '8px';
+      row.append(pill(meta.from), el('span', 'arrow', '→'), pill(meta.to));
+
+      const devices = (meta.devices || []).map((d) => DEVICE_LABELS[d] || d).join(' + ');
+      if (devices) row.append(el('span', 'tag', devices));
+      const activities = (meta.activities || []).map((a) => a?.name).filter(Boolean).join(' · ');
+      if (activities) row.append(el('span', 'tag', activities));
+      return row;
+    }
+
+    default:
+      return event.content ? bodyNode(event.content, true) : null;
+  }
+}
+
+function card(event, isNew) {
+  const meta = TYPES[event.event_type] || { icon: '•', cls: 'message', verb: event.event_type };
+
+  const article = el('article', `ev ev--${meta.cls}`);
+  article.dataset.id = String(event.id ?? '');
+  if (isNew) article.classList.add('is-new');
+
+  article.append(el('div', 'ev__icon', meta.icon));
+
+  const main = el('div');
+  const head = el('header', 'ev__head');
+
+  const avatar = el('span', 'ev__avatar');
+  const userId = String(event.user_id || '');
+  avatarInto(avatar, avatarFor(userId), event.username || userId);
+  avatar.style.cursor = 'pointer';
+  avatar.dataset.user = userId;
+
+  head.append(
+    avatar,
+    el('span', 'ev__user', event.username || userId),
+    el('span', 'ev__verb', meta.verb),
+  );
+
+  const time = el('time', 'ev__time', timeAgo(event.created_at));
+  time.title = new Date(event.created_at || Date.now()).toLocaleString();
+  time.dataset.ts = event.created_at || '';
+  head.append(time);
+  main.append(head);
+
+  const where = el('div', 'ev__where');
+  if (event.channel_name) where.append(el('span', 'tag', `#${event.channel_name}`));
+  if (event.guild_name) where.append(el('span', 'tag tag--click', event.guild_name));
+  else if (!event.channel_name && event.channel_id) where.append(el('span', 'tag', event.channel_id));
+  if (where.childElementCount) main.append(where);
+
+  const body = eventBody(event);
+  if (body) main.append(body);
+
+  article.append(main);
+  return article;
+}
+
+function matches(event) {
+  if (!typeMatches(event.event_type, state.type)) return false;
+  if (state.guild && String(event.guild_id || '') !== state.guild) return false;
+  if (state.user && String(event.user_id || '') !== state.user) return false;
+  if (state.q) {
+    const needle = state.q.toLowerCase();
+    const hay = `${event.username ?? ''} ${event.content ?? ''} ${event.old_content ?? ''} ${event.channel_name ?? ''}`.toLowerCase();
+    if (!hay.includes(needle)) return false;
+  }
+  return true;
+}
+
+function renderFeed() {
+  const feed = $('feed');
+  const visible = state.events.filter(matches);
+  feed.replaceChildren();
+
+  if (!visible.length) {
+    const empty = el('div', 'empty');
+    if (!state.events.length) {
+      empty.append(el('strong', null, 'Sin actividad todavía'));
+      empty.append(document.createTextNode(state.bot?.connected
+        ? 'El bot está escuchando: apenas tu objetivo haga algo, aparece acá.'
+        : 'Conectá tu token de Discord y fijá un objetivo para empezar a ver actividad.'));
+    } else {
+      empty.append(el('strong', null, 'Ningún evento con estos filtros'));
+      empty.append(document.createTextNode('Probá limpiar los filtros o cambiar el tipo.'));
+    }
+    feed.append(empty);
+  } else {
+    for (const event of visible) feed.append(card(event, false));
+  }
+
+  show($('more'), Boolean(state.next));
+  renderFilters();
+}
+
+function renderFilters() {
+  const active = Boolean(state.user || state.guild || state.q);
+  show($('filters'), active);
+  if (state.user) {
+    const target = state.targets.find((row) => String(row.user_id) === state.user);
+    $('user-filter-name').textContent = target?.username || state.user;
+  }
+  $('user-filter-clear').classList.toggle('hidden', !state.user);
+}
+
+function prependEvent(event) {
+  if (!matches(event)) return;
+  state.events.unshift(event);
+  const feed = $('feed');
+  const empty = feed.querySelector('.empty');
+  if (empty) feed.replaceChildren();
+  feed.prepend(card(event, true));
+  while (feed.children.length > 300) feed.lastElementChild.remove();
+}
+
+/* ----------------------------------------------------------------- feed -- */
+
+const PAGE = 60;
+
+function feedQuery(offset) {
+  const params = new URLSearchParams({ limit: String(PAGE), offset: String(offset) });
+  if (state.type) params.set('type', state.type);
+  if (state.user) params.set('user', state.user);
+  if (state.guild) params.set('guild', state.guild);
+  if (state.q) params.set('q', state.q);
+  return `/api/events?${params}`;
+}
+
+async function loadFeed({ append = false } = {}) {
+  const seq = ++state.feedSeq;
+  state.feedController?.abort();
+  const controller = new AbortController();
+  state.feedController = controller;
+  state.feedLoading = true;
+
+  const offset = append ? state.events.length : 0;
+  if (!append) feedSkeleton();
+
+  try {
+    const data = await api(feedQuery(offset), { signal: controller.signal });
+    if (seq !== state.feedSeq) return;
+    const rows = data.events || [];
+    state.events = append ? [...state.events, ...rows] : rows;
+    state.next = data.next || null;
+    if (data.dbError) noteDbError(data.dbError);
+    renderFeed();
+  } catch (error) {
+    if (error.name === 'AbortError' || seq !== state.feedSeq) return;
+    state.events = append ? state.events : [];
+    state.next = null;
+    renderFeed();
+    toast(error.message, 'bad');
+  } finally {
+    if (seq === state.feedSeq) {
+      state.feedLoading = false;
+      state.feedController = null;
+    }
+  }
+}
+
+function feedSkeleton() {
+  const feed = $('feed');
+  feed.replaceChildren();
+  for (let i = 0; i < 4; i += 1) feed.append(el('div', 'skel'));
+}
+
+function noteDbError(message) {
+  if (state.db) state.db = { ...state.db, ok: false, message };
+  renderDb();
+}
+
+/* -------------------------------------------------------------- resumen --- */
+
+let summaryTimer = 0;
+
+function refreshSummary({ immediate = false } = {}) {
+  clearTimeout(summaryTimer);
+  const run = async () => {
+    try {
+      const summary = await api('/api/summary');
+      state.summary = summary;
+      if (summary.dbError) noteDbError(summary.dbError);
+      renderStats();
+      renderTargets();
+    } catch {
+      // silencioso: el polling reintenta y el banner ya avisa del problema
+    }
+  };
+  if (immediate) run();
+  else summaryTimer = setTimeout(run, 700);
+}
+
+function localSummaryBump(event) {
+  const summary = state.summary;
+  if (!summary) return;
+  summary.total24h = (summary.total24h || 0) + 1;
+  summary.byType = summary.byType || {};
+  summary.byType[event.event_type] = (summary.byType[event.event_type] || 0) + 1;
+
+  summary.presence = summary.presence || {};
+  summary.voice = summary.voice || {};
+  summary.activity = summary.activity || {};
+
+  const meta = event.metadata || {};
+  const userId = String(event.user_id || '');
+  if (event.event_type === 'presence') {
+    summary.presence[userId] = meta.to || null;
+    summary.activity[userId] = {
+      status: meta.to || null,
+      activities: meta.activities || [],
+      devices: meta.devices || [],
+    };
+  }
+  if (event.event_type.startsWith('voice_')) {
+    const previous = summary.voice[userId] || {};
+    if (event.event_type === 'voice_join' || event.event_type === 'voice_move') {
+      summary.voice[userId] = {
+        ...previous,
+        channel_name: event.channel_name || event.channel_id,
+        since: Date.parse(event.created_at) || Date.now(),
+      };
+    } else if (event.event_type === 'voice_leave') {
+      delete summary.voice[userId];
+    } else if (event.event_type === 'voice_stream') {
+      summary.voice[userId] = { ...previous, streaming: Boolean(meta.streaming) };
+    } else if (event.event_type === 'voice_camera') {
+      summary.voice[userId] = { ...previous, camera: Boolean(meta.camera) };
+    }
+  }
+  if (event.event_type === 'profile_update' && meta.after?.avatar_url) {
+    summary.avatars = summary.avatars || {};
+    summary.avatars[userId] = meta.after.avatar_url;
+  }
+  renderStats();
+  renderTargets();
+}
+
+/* ------------------------------------------------------------------ bot --- */
+
+async function pollBot() {
+  if (state.botBusy) return;
+  state.botBusy = true;
+  try {
+    const data = await api('/api/settings');
+    state.bot = data.bot;
+    state.account = data.account || state.account;
+    state.db = data.db || state.db;
+    renderBot();
+    renderAccount();
+    renderDb();
+
+    if (state.bot.connected && !state.wasConnected) {
+      state.wasConnected = true;
+      toast('Cuenta de Discord conectada');
+      await reloadTargets();
+      loadFeed();
+    }
+    if (!state.bot.connected) state.wasConnected = false;
+  } catch (error) {
+    if (error.status === 401) return toAuth();
+  } finally {
+    state.botBusy = false;
+  }
+}
+
+function startBotPolling() {
+  clearInterval(state.botTimer);
+  const connecting = state.bot?.connecting || (state.bot?.configured && !state.bot?.connected);
+  state.botTimer = setInterval(() => {
+    if (document.hidden) return;
+    if (state.bot?.connected && !state.bot?.error) {
+      clearInterval(state.botTimer);
+      state.botTimer = 0;
+      return;
+    }
+    pollBot();
+  }, connecting ? 2000 : 6000);
+}
+
+/* --------------------------------------------------------------- targets -- */
+
+async function reloadTargets() {
+  try {
+    const data = await api('/api/targets');
+    state.targets = data.targets || [];
+    hydrateAvatars();
+    renderTargets();
+    renderStats();
+  } catch (error) {
+    if (error.status === 401) return toAuth();
+    toast(error.message, 'bad');
+  }
+}
+
+function hydrateAvatars() {
+  const known = new Map();
+  for (const event of state.events) {
+    const id = String(event.user_id || '');
+    if (id && !known.has(id) && event.metadata?.after?.avatar_url) {
+      known.set(id, event.metadata.after.avatar_url);
+    }
+  }
+  for (const target of state.targets) {
+    if (!target.avatar_url) target.avatar_url = known.get(String(target.user_id)) || null;
+  }
+}
+
+async function addTarget(userId, note) {
+  const id = String(userId);
+  const existing = state.targets.find((row) => String(row.user_id) === id);
+  if (existing) {
+    if (existing.pending) return;
+    if (note) existing.note = note;
+    existing.pending = true;
+    renderTargets();
+  } else {
+    state.targets = [
+      ...state.targets,
+      { user_id: id, username: null, note: note || null, pending: true, created_at: new Date().toISOString() },
+    ];
+    renderTargets();
+  }
+
+  try {
+    const data = await api('/api/targets', { method: 'POST', body: { user_id: id, note: note || '' } });
+    let placed = false;
+    state.targets = state.targets.reduce((rows, row) => {
+      if (String(row.user_id) !== id) rows.push(row);
+      else if (!placed) {
+        rows.push({ ...row, ...data.target, pending: false });
+        placed = true;
+      }
+      return rows;
+    }, []);
+    renderTargets();
+    toast('Objetivo fijado');
+    $('target-form').reset();
+    refreshSummary();
+    loadFeedForUser(id);
+  } catch (error) {
+    if (existing) {
+      existing.pending = false;
+    } else {
+      state.targets = state.targets.filter((row) => !(String(row.user_id) === id && row.pending));
+    }
+    renderTargets();
+    toast(error.message, 'bad');
+  }
+}
+
+async function removeTarget(userId) {
+  state.targets = state.targets.map((row) => (
+    String(row.user_id) === userId ? { ...row, pending: true } : row
+  ));
+  renderTargets();
+  try {
+    await api(`/api/targets/${encodeURIComponent(userId)}`, { method: 'DELETE' });
+    state.targets = state.targets.filter((row) => String(row.user_id) !== userId);
+    if (state.user === userId) setUserFilter('');
+    toast('Dejaste de seguir a ese usuario');
+    refreshSummary();
+  } catch (error) {
+    state.targets = state.targets.map((row) => (
+      String(row.user_id) === userId ? { ...row, pending: false } : row
+    ));
+    toast(error.message, 'bad');
+  }
+  renderTargets();
+}
+
+function loadFeedForUser(userId) {
+  if (state.user && state.user !== userId) return;
+  state.user = userId;
+  loadFeed();
+}
+
+function setUserFilter(userId) {
+  state.user = userId || '';
+  renderFilters();
+  loadFeed();
+}
+
+/* ------------------------------------------------------------------ SSE -- */
+
+function openStream() {
+  state.source?.close();
+  const source = new EventSource('/api/stream');
+  state.source = source;
+
+  source.onopen = () => {
+    setLive(true);
+    if (state.streamDownSince && Date.now() - state.streamDownSince > 8000) refreshSummary({ immediate: true });
+    state.streamDownSince = 0;
+  };
+
+  source.onmessage = (message) => {
+    let rows;
+    try {
+      rows = JSON.parse(message.data);
+    } catch {
+      return;
+    }
+    if (!Array.isArray(rows)) rows = [rows];
+    for (const row of rows) {
+      if (!row?.event_type) continue;
+      state.events.unshift(row);
+      if (state.events.length > 400) state.events.length = 400;
+      prependEvent(row);
+      localSummaryBump(row);
+    }
+  };
+
+  source.onerror = () => {
+    setLive(false);
+    state.streamDownSince = state.streamDownSince || Date.now();
+    // EventSource reintenta solo; si la sesión murió, el poll de bot lo detecta.
+  };
+}
+
+function closeStream() {
+  state.source?.close();
+  state.source = null;
+  setLive(false);
+}
+
+function setLive(on) {
+  const dot = $('live-dot');
+  dot.className = `dot ${on ? 'dot--live' : 'dot--down'}`;
+  $('live-label').textContent = on ? 'en vivo' : 'reconectando';
+}
+
+/* ------------------------------------------------------------ token/acc -- */
+
+async function saveToken(token, box) {
+  box.textContent = 'Validando el token…';
+  box.className = 'onb__msg';
+  try {
+    const data = await api('/api/settings/token', { method: 'PUT', body: { token } });
+    state.account = data.account || state.account;
+    state.bot = data.bot || state.bot;
+    renderAccount();
+    renderBot();
+    startBotPolling();
+    box.textContent = 'Conectado. Ya podés fijar un objetivo.';
+    box.className = 'onb__msg is-ok';
+    toast('Token guardado');
+    setTimeout(() => {
+      show($('onboarding'), false);
+      loadFeed();
+      reloadTargets();
+    }, 900);
+    return true;
+  } catch (error) {
+    box.textContent = error.message;
+    box.className = 'onb__msg is-bad';
+    return false;
+  }
+}
+
+async function clearToken(box) {
+  box.textContent = 'Desconectando…';
+  box.className = 'cfg__msg';
+  try {
+    const data = await api('/api/settings/token', { method: 'DELETE' });
+    state.account = data.account || state.account;
+    state.bot = null;
+    renderAccount();
+    renderBot();
+    show($('onboarding'), true);
+    box.textContent = 'Token quitado de tu cuenta.';
+    box.className = 'cfg__msg is-ok';
+    toast('Cuenta de Discord desconectada');
+  } catch (error) {
+    box.textContent = error.message;
+    box.className = 'cfg__msg is-bad';
+  }
+}
+
+/* ---------------------------------------------------------------- picker -- */
+
+const picker = $('picker');
+const settings = $('settings');
+
+function openModal(node) {
+  if (!node.open) node.showModal();
+  document.body.classList.add('is-locked');
+}
+
+function closeModal(node) {
+  if (node.open) node.close();
+  if (![...document.querySelectorAll('dialog')].some((d) => d.open)) {
+    document.body.classList.remove('is-locked');
+  }
+}
+
+function renderGuildOptions() {
+  const select = $('picker-guild');
+  select.replaceChildren();
+  const guilds = state.guilds || [];
+  if (!guilds.length) {
+    select.append(el('option', null, 'Sin servidores cargados'));
+    select.disabled = true;
+    return;
+  }
+  select.disabled = false;
+  for (const guild of guilds) {
+    const option = el('option', null, guild.name);
+    option.value = guild.id;
+    select.append(option);
+  }
+}
+
+async function loadMembers(query) {
+  const seq = ++state.memberSeq;
+  state.memberController?.abort();
+  const controller = new AbortController();
+  state.memberController = controller;
+
+  const guild = $('picker-guild').value;
+  if (!guild) {
+    $('picker-list').replaceChildren(el('div', 'hint', 'Elegí un servidor.'));
+    return;
+  }
+
+  const list = $('picker-list');
+  list.replaceChildren(el('div', 'hint', 'Buscando miembros…'));
+  $('picker-error').textContent = '';
+
+  const params = new URLSearchParams({ guild });
+  if (query) params.set('q', query);
+
+  try {
+    const data = await api(`/api/members?${params}`, { signal: controller.signal });
+    if (seq !== state.memberSeq) return;
+    const members = data.members || [];
+    list.replaceChildren();
+    if (!members.length) {
+      list.append(el('div', 'hint', 'No aparecieron miembros. Puede que la lista esté limitada para selfbots.'));
+      return;
+    }
+    for (const member of members) {
+      const row = el('div', 'member');
+      const avatar = el('div', 'member__avatar');
+      avatarInto(avatar, member.avatar_url, member.username);
+      row.append(avatar, el('span', 'member__name', member.username), el('span', 'member__id', member.id));
+      const tracked = state.targets.some((target) => String(target.user_id) === String(member.id));
+      const button = el('button', 'btn btn--mini', tracked ? 'Siguiendo' : 'Fijar');
+      button.type = 'button';
+      if (tracked) button.disabled = true;
+      else
+        button.addEventListener('click', () => {
+          closeModal(picker);
+          addTarget(member.id, '');
+        });
+      row.append(button);
+      list.append(row);
+    }
+  } catch (error) {
+    if (error.name === 'AbortError' || seq !== state.memberSeq) return;
+    list.replaceChildren();
+    $('picker-error').textContent = error.message;
+  }
+}
+
+/* ------------------------------------------------------------ listeners -- */
+
+$('target-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  const userId = snowflake($('target-id').value);
+  if (!userId) {
+    toast('El ID necesita entre 17 y 20 dígitos', 'bad');
+    $('target-id').focus();
+    return;
+  }
+  $('target-submit').disabled = true;
+  addTarget(userId, $('target-note').value.trim())
+    .finally(() => { $('target-submit').disabled = false; });
+});
+
+$('targets').addEventListener('click', (event) => {
+  const remove = event.target.closest('[data-remove]');
+  if (remove) {
+    event.stopPropagation();
+    removeTarget(remove.dataset.remove);
+    return;
+  }
+  const row = event.target.closest('[data-user]');
+  if (row) setUserFilter(state.user === row.dataset.user ? '' : row.dataset.user);
+});
+
+$('targets').addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  const row = event.target.closest('[data-user]');
+  if (!row) return;
+  event.preventDefault();
+  setUserFilter(state.user === row.dataset.user ? '' : row.dataset.user);
+});
+
+$('chips').addEventListener('click', (event) => {
+  const chip = event.target.closest('[data-type]');
+  if (!chip) return;
+  state.type = chip.dataset.type;
+  for (const node of $('chips').children) node.classList.toggle('is-on', node === chip);
+  loadFeed();
+});
+
+$('feed').addEventListener('click', (event) => {
+  const avatar = event.target.closest('.ev__avatar[data-user]');
+  if (avatar && avatar.dataset.user) {
+    setUserFilter(state.user === avatar.dataset.user ? '' : avatar.dataset.user);
+    return;
+  }
+  const body = event.target.closest('.ev__body.clamped');
+  if (body) body.classList.toggle('clamped');
+});
+
+$('user-filter-clear').addEventListener('click', () => setUserFilter(''));
+$('clear-filters').addEventListener('click', () => {
+  state.user = '';
+  state.guild = '';
+  state.q = '';
+  state.type = '';
+  $('search').value = '';
+  $('guild-select').value = '';
+  for (const node of $('chips').children) node.classList.toggle('is-on', !node.dataset.type);
+  loadFeed();
+});
+
+const runSearch = debounce(() => {
+  state.q = $('search').value.trim();
+  loadFeed();
+}, 350);
+$('search').addEventListener('input', runSearch);
+$('search').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    runSearch();
+  }
+});
+
+$('guild-select').addEventListener('change', () => {
+  state.guild = $('guild-select').value;
+  loadFeed();
+});
+
+$('more').addEventListener('click', () => loadFeed({ append: true }));
+$('refresh').addEventListener('click', () => {
+  loadFeed();
+  refreshSummary({ immediate: true });
+  pollBot();
+  toast('Actualizado');
+});
+
+$('pause').addEventListener('click', () => {
+  state.paused = !state.paused;
+  if (state.paused) {
+    closeStream();
+    $('pause').textContent = 'Reanudar';
+    setLive(false);
+    $('live-label').textContent = 'en pausa';
+  } else {
+    openStream();
+    $('pause').textContent = 'Pausar';
+  }
+});
+
+$('bot-action').addEventListener('click', () => {
+  api('/api/bot/reconnect', { method: 'POST' })
+    .then((data) => {
+      state.bot = data.bot;
+      renderBot();
+      startBotPolling();
+      toast('Reintentando la conexión');
+    })
+    .catch((error) => toast(error.message, 'bad'));
+});
+
+$('onboarding-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  const token = $('onboarding-token').value.trim();
+  if (!token) {
+    $('onboarding-msg').textContent = 'Pegá el token primero.';
+    $('onboarding-msg').className = 'onb__msg is-bad';
+    return;
+  }
+  $('onboarding-submit').disabled = true;
+  saveToken(token, $('onboarding-msg')).finally(() => { $('onboarding-submit').disabled = false; });
+});
+
+$('open-picker').addEventListener('click', () => {
+  renderGuildOptions();
+  openModal(picker);
+  loadMembers('');
+});
+$('picker-guild').addEventListener('change', () => loadMembers($('picker-search').value.trim()));
+$('picker-search').addEventListener('input', debounce(() => loadMembers($('picker-search').value.trim()), 320));
+
+$('open-settings').addEventListener('click', () => openModal(settings));
+$('open-settings-top').addEventListener('click', () => openModal(settings));
+settings.addEventListener('click', (event) => {
+  if (event.target === settings || event.target.closest('[data-close]')) closeModal(settings);
+});
+picker.addEventListener('click', (event) => {
+  if (event.target === picker || event.target.closest('[data-close]')) closeModal(picker);
+});
+for (const node of document.querySelectorAll('dialog')) {
+  node.addEventListener('cancel', () => {
+    if (![...document.querySelectorAll('dialog')].some((d) => d.open && d !== node)) {
+      document.body.classList.remove('is-locked');
+    }
+  });
+}
+
+$('set-token-save').addEventListener('click', () => {
+  const token = $('set-token').value.trim();
+  const box = $('set-token-msg');
+  if (!token) {
+    box.textContent = 'Pegá el token de Discord.';
+    box.className = 'cfg__msg is-bad';
+    return;
+  }
+  $('set-token-save').disabled = true;
+  box.textContent = 'Validando…';
+  box.className = 'cfg__msg';
+  api('/api/settings/token', { method: 'PUT', body: { token } })
+    .then((data) => {
+      state.account = data.account || state.account;
+      state.bot = data.bot || state.bot;
+      renderAccount();
+      renderBot();
+      startBotPolling();
+      show($('onboarding'), false);
+      $('set-token').value = '';
+      box.textContent = 'Guardado y reconectando.';
+      box.className = 'cfg__msg is-ok';
+      toast('Token actualizado');
+      loadFeed();
+    })
+    .catch((error) => {
+      box.textContent = error.message;
+      box.className = 'cfg__msg is-bad';
+    })
+    .finally(() => { $('set-token-save').disabled = false; });
+});
+
+$('set-token-clear').addEventListener('click', () => clearToken($('set-token-msg')));
+
+$('set-password-save').addEventListener('click', () => {
+  const box = $('set-password-msg');
+  box.textContent = 'Guardando…';
+  box.className = 'cfg__msg';
+  api('/api/account', {
+    method: 'PUT',
+    body: { current: $('set-current').value, password: $('set-password').value },
+  })
+    .then((data) => {
+      state.account = data.account || state.account;
+      renderAccount();
+      $('set-current').value = '';
+      $('set-password').value = '';
+      box.textContent = 'Contraseña actualizada.';
+      box.className = 'cfg__msg is-ok';
+      toast('Contraseña cambiada');
+    })
+    .catch((error) => {
+      box.textContent = error.message;
+      box.className = 'cfg__msg is-bad';
+    });
+});
+
+$('set-hwid-clear').addEventListener('click', () => {
+  const box = $('set-hwid-msg');
+  box.textContent = 'Desvinculando…';
+  box.className = 'cfg__msg';
+  api('/api/account/hwid', { method: 'DELETE', body: { password: $('set-hwid-password').value } })
+    .then(() => {
+      box.textContent = 'Listo. Iniciá sesión en el equipo nuevo.';
+      box.className = 'cfg__msg is-ok';
+      setTimeout(toAuth, 900);
+    })
+    .catch((error) => {
+      box.textContent = error.message;
+      box.className = 'cfg__msg is-bad';
+    });
+});
+
+/* --------------------------------------------------------------- sidebar -- */
+
+function openSidebar(on) {
+  $('app').classList.toggle('is-open', on);
+  document.body.classList.toggle('is-locked', on && window.innerWidth <= 860);
+}
+
+$('open-sidebar').addEventListener('click', () => openSidebar(true));
+$('close-sidebar').addEventListener('click', () => openSidebar(false));
+$('scrim').addEventListener('click', () => openSidebar(false));
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') openSidebar(false);
+});
+
+/* ---------------------------------------------------------------- logout -- */
+
+async function logout() {
+  try {
+    await api('/api/logout', { method: 'POST' });
+  } catch {
+    // la cookie ya no sirve: igual volvemos al login
+  }
+  toAuth();
+}
+
+$('logout').addEventListener('click', logout);
+
+function toAuth() {
+  closeStream();
+  clearInterval(state.botTimer);
+  state.botTimer = 0;
+  state.account = null;
+  show($('app'), false);
+  show($('auth'), true);
+  show($('boot'), false);
+  setAuthMode('login');
+  openSidebar(false);
+}
+
+/* ------------------------------------------------------------------ boot -- */
+
+function startApp(account) {
+  state.account = account;
+  show($('boot'), false);
+  show($('auth'), false);
+  show($('app'), true);
+  renderAccount();
+  openStream();
+  startBotPolling();
+}
+
+async function loadData() {
+  show($('boot'), true);
+  try {
+    const data = await api('/api/bootstrap');
+    state.account = data.account;
+    state.bot = data.bot;
+    state.db = data.db;
+    state.targets = data.targets || [];
+    state.summary = data.summary;
+    state.events = data.events || [];
+    state.next = data.next || null;
+    state.guilds = data.guilds || [];
+    state.wasConnected = Boolean(data.bot?.connected);
+
+    startApp(data.account);
+    hydrateAvatars();
+    renderBot();
+    renderDb();
+    renderStats();
+    renderTargets();
+    renderGuildSelect();
+    renderFeed();
+  } catch (error) {
+    show($('boot'), false);
+    if (error.status === 401) {
+      show($('auth'), true);
+      setAuthMode('login');
+      return;
+    }
+    show($('auth'), true);
+    setAuthMode(state.authMode);
+    setAuthError(error.message, 'Recargá cuando el servidor vuelva a responder.');
+  }
+}
+
+async function enterApp(account) {
+  startApp(account);
+  await loadData();
+}
+
+function renderGuildSelect() {
+  const select = $('guild-select');
+  const current = select.value;
+  select.replaceChildren(el('option', null, 'Todos los servidores'));
+  select.firstElementChild.value = '';
+  for (const guild of state.guilds || []) {
+    const option = el('option', null, guild.name);
+    option.value = guild.id;
+    select.append(option);
+  }
+  select.value = current;
+  show(select, (state.guilds || []).length > 0);
+}
+
+/* reloj relativo del feed, una vez por minuto */
+setInterval(() => {
+  if (document.hidden) return;
+  for (const node of document.querySelectorAll('.ev__time[data-ts]')) {
+    node.textContent = timeAgo(node.dataset.ts);
+  }
+}, 60_000);
+
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && state.account && !state.source) openStream();
+});
+
+setAuthMode('login');
+loadData();
+

@@ -5,19 +5,13 @@ const fs = require('fs');
 const path = require('path');
 
 /**
- * Configuración en caliente. Los valores pueden venir de variables de entorno
- * (deploy en Railway) o de data/settings.json (lo que se carga desde el panel).
+ * Configuración de infraestructura. Ya no se edita desde el panel: Supabase y
+ * el secreto de sesión vienen del entorno del deploy. El token de Discord es
+ * de cada cuenta y vive en la tabla `accounts`, no acá.
  *
- * Precedencia: entorno > archivo. Si una variable está definida, el panel la
- * muestra bloqueada y no deja pisarla: en un deploy las env son la verdad, y
- * permitir que el panel las contradiga vuelve el arranque impredecible.
- *
- * El archivo guarda secretos en claro (token, service key) porque el proceso
- * necesita usarlos tal cual contra Discord y Supabase. Por eso vive fuera del
- * repo (data/ está en .gitignore) y se escribe con modo 600.
- *
- * Cuenta: usuario + contraseña con scrypt. Las API keys se guardan hasheadas
- * (sha256) y el token completo se muestra una sola vez al crearlas.
+ * Precedencia: variables de entorno > data/settings.json (compatibilidad con
+ * instalaciones viejas). La cuenta legacy del deploy (DASHBOARD_USERNAME /
+ * DASHBOARD_PASSWORD) se mantiene solo para migrar al admin existente.
  */
 
 const DATA_DIR = process.env.DATA_DIR
@@ -25,32 +19,20 @@ const DATA_DIR = process.env.DATA_DIR
   : path.join(__dirname, '..', 'data');
 const FILE = path.join(DATA_DIR, 'settings.json');
 
-const FIELDS = ['discordToken', 'supabaseUrl', 'supabaseKey', 'alertWebhook', 'selfPresence'];
-
-const ENV_NAMES = {
-  discordToken: 'DISCORD_TOKEN',
-  supabaseUrl: 'SUPABASE_URL',
-  supabaseKey: 'SUPABASE_SERVICE_KEY',
-  alertWebhook: 'ALERT_WEBHOOK',
-  selfPresence: 'SELF_PRESENCE',
-};
-
-const PRESENCE_VALUES = new Set(['online', 'idle', 'dnd', 'invisible']);
-const MIN_PASSWORD = 8;
-const MAX_KEYS = 25;
-const KEY_PREFIX = 'xyb_';
+const SUPABASE_URL_VARS = ['SUPABASE_URL', 'SUPABASE_PROJECT_URL', 'NEXT_PUBLIC_SUPABASE_URL'];
+const SUPABASE_KEY_VARS = [
+  'SUPABASE_SERVICE_KEY',
+  'SUPABASE_SERVICE_ROLE_KEY',
+  'SUPABASE_SECRET_KEY',
+  'SUPABASE_KEY',
+];
 
 let stored = {};
-let account = null; // { username, salt, hash }
-let apiKeys = []; // [{ id, name, prefix, hash, created_at, last_used_at }]
+let account = null;
 let loaded = false;
-let persistTimer = null;
+let sessionSecretCache = '';
 
 /* ------------------------------------------------------------------ archivo */
-
-function ensureDir() {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-}
 
 function load() {
   if (loaded) return;
@@ -69,8 +51,6 @@ function load() {
           hash: String(parsed.account.hash || ''),
         };
       } else if (parsed.password && parsed.password.hash) {
-        // Migración v1: el panel tenía solo contraseña. La cuenta pasa a
-        // llamarse `admin` y el usuario puede cambiarla desde Ajustes.
         account = {
           username: 'admin',
           salt: String(parsed.password.salt || ''),
@@ -78,18 +58,9 @@ function load() {
         };
       }
 
-      apiKeys = Array.isArray(parsed.apiKeys)
-        ? parsed.apiKeys
-            .filter((key) => key && key.hash && key.id)
-            .map((key) => ({
-              id: String(key.id),
-              name: String(key.name || 'API key').slice(0, 60),
-              prefix: String(key.prefix || ''),
-              hash: String(key.hash),
-              created_at: key.created_at || new Date().toISOString(),
-              last_used_at: key.last_used_at || null,
-            }))
-        : [];
+      if (typeof stored.sessionSecret === 'string' && stored.sessionSecret.length >= 32) {
+        sessionSecretCache = stored.sessionSecret;
+      }
     }
   } catch (error) {
     if (error.code !== 'ENOENT') {
@@ -97,69 +68,34 @@ function load() {
     }
     stored = {};
     account = null;
-    apiKeys = [];
-  }
-
-  // Una clave de sesión persistida evita que cada reinicio cierre todas las
-  // sesiones del panel. Si no hay, se genera y se guarda en el primer uso.
-  if (typeof stored.sessionSecret === 'string' && stored.sessionSecret.length >= 32) {
-    sessionSecretCache = stored.sessionSecret;
   }
 }
 
 function persist() {
-  try {
-    ensureDir();
-    const payload = JSON.stringify(
-      {
-        version: 2,
-        updated_at: new Date().toISOString(),
-        values: stored,
-        account,
-        apiKeys,
-      },
-      null,
-      2
-    );
-    const tmp = `${FILE}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, payload, { mode: 0o600 });
-    fs.renameSync(tmp, FILE);
-  } catch (error) {
-    console.error('[settings] no se pudo guardar data/settings.json:', error.message);
-    throw Object.assign(new Error('No se pudo guardar la configuración en disco'), { code: 'io' });
-  }
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  const payload = JSON.stringify(
+    {
+      version: 3,
+      updated_at: new Date().toISOString(),
+      values: stored,
+      account,
+    },
+    null,
+    2
+  );
+  const tmp = `${FILE}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, payload, { mode: 0o600 });
+  fs.renameSync(tmp, FILE);
 }
 
-/** Las keys marcan last_used en memoria y el archivo se escribe con delay. */
-function schedulePersist() {
-  if (persistTimer) return;
-  persistTimer = setTimeout(() => {
-    persistTimer = null;
-    try {
-      persist();
-    } catch {
-      // el próximo cambio vuelve a intentar
-    }
-  }, 5000);
-  persistTimer.unref?.();
-}
+/* -------------------------------------------------------------- credenciales */
 
-/* -------------------------------------------------------------- validación */
-
-/** Copiar/pegar desde el panel de Railway suele arrastrar comillas o saltos. */
+/** Copiar/pegar desde un panel suele arrastrar comillas o saltos. */
 function strip(value) {
   return String(value ?? '')
     .trim()
     .replace(/^["'`]+|["'`]+$/g, '')
     .trim();
-}
-
-function envValue(field) {
-  return strip(process.env[ENV_NAMES[field]] || '');
-}
-
-function fromEnv(field) {
-  return envValue(field) !== '';
 }
 
 /** Acepta la URL del proyecto con o sin /rest/v1 y sin barra final. */
@@ -171,103 +107,93 @@ function normalizeUrl(value) {
     .replace(/\/+$/, '');
 }
 
-function invalid(message) {
-  return Object.assign(new Error(message), { code: 'invalid' });
+/**
+ * Rechaza claves públicas y JWT que no sean service_role. Las claves nuevas
+ * `sb_secret_…` se aceptan directo. Esto evita arrancar con la anon key por
+ * error y perder horas mirando "permission denied".
+ */
+function keyLooksUsable(key) {
+  const raw = strip(key);
+  if (!raw || raw.length < 20) return false;
+  if (raw.startsWith('sb_publishable_') || raw.startsWith('sb_anon')) return false;
+  if (!raw.startsWith('eyJ')) return true;
+
+  try {
+    const payload = JSON.parse(Buffer.from(raw.split('.')[1] || '', 'base64url').toString('utf8'));
+    if (payload.role && payload.role !== 'service_role') return false;
+  } catch {
+    // JWT raro: que decida la prueba real contra Supabase.
+  }
+  return true;
 }
 
-function sanitize(field, value) {
-  const raw = String(value ?? '').trim();
-
-  if (field === 'supabaseUrl') {
-    if (!raw) return '';
-    const url = normalizeUrl(raw);
-    let parsed;
-    try {
-      parsed = new URL(url);
-    } catch {
-      throw invalid('La URL de Supabase no es válida');
-    }
-    if (parsed.protocol !== 'https:') throw invalid('La URL de Supabase tiene que ser https');
-    if (!parsed.hostname.endsWith('.supabase.co') && !parsed.hostname.endsWith('.supabase.in')) {
-      // Self-hosted también existe: solo avisamos si claramente no es Supabase.
-      if (!/supabase/i.test(parsed.hostname)) {
-        throw invalid('Esa URL no parece de Supabase');
-      }
-    }
-    return url;
-  }
-
-  if (field === 'supabaseKey') {
-    if (!raw) return '';
-    if (raw.startsWith('sb_publishable_') || raw.startsWith('sb_anon')) {
-      throw invalid('Esa es la clave pública. El server necesita la secret key (service_role).');
-    }
-    if (raw.length < 20) throw invalid('La secret key de Supabase es demasiado corta');
-    if (raw.startsWith('eyJ')) {
-      try {
-        const payload = JSON.parse(Buffer.from(raw.split('.')[1] || '', 'base64url').toString('utf8'));
-        if (payload.role && payload.role !== 'service_role') {
-          throw invalid(`Esa key tiene rol "${payload.role}". Necesitás la service_role.`);
-        }
-      } catch (error) {
-        if (error.code === 'invalid') throw error;
-        // JWT raro: dejamos pasar, la prueba contra Supabase decide.
-      }
-    }
-    return raw;
-  }
-
-  if (field === 'discordToken') {
-    if (!raw) return '';
-    if (/\s/.test(raw)) throw invalid('El token de Discord no puede tener espacios ni saltos de línea');
-    if (raw.length < 30) throw invalid('El token de Discord es demasiado corto');
-    return raw;
-  }
-
-  if (field === 'alertWebhook') {
-    if (!raw) return '';
-    if (!/^https:\/\/(discord|discordapp)\.com\/api\/webhooks\//i.test(raw)) {
-      throw invalid('El webhook tiene que ser una URL de webhook de Discord');
-    }
-    return raw;
-  }
-
-  if (field === 'selfPresence') {
-    if (!raw) return '';
-    const value = raw.toLowerCase();
-    if (!PRESENCE_VALUES.has(value)) throw invalid('SELF_PRESENCE debe ser online, idle, dnd o invisible');
-    return value;
-  }
-
-  throw invalid(`Campo desconocido: ${field}`);
-}
-
-function normalizeUsername(value) {
-  const raw = String(value ?? '').trim().toLowerCase();
-  if (!/^[a-z0-9][a-z0-9._-]{2,31}$/.test(raw)) {
-    throw invalid('El usuario necesita 3 a 32 caracteres: letras, números, punto, guion o guion bajo');
-  }
-  return raw;
-}
-
-/* --------------------------------------------------------------- lectura -- */
-
-function get() {
+/**
+ * Combinaciones URL + key a probar al arrancar. Railway puede tener la key
+ * buena en `SUPABASE_KEY` y una vieja en `SUPABASE_SERVICE_KEY`; probar todas
+ * y quedarse con la que responde es lo que corta el "Invalid API key".
+ */
+function supabaseCandidates() {
   load();
-  const out = {};
-  for (const field of FIELDS) {
-    const env = envValue(field);
-    out[field] = env || strip(stored[field]);
+
+  const urls = [];
+  for (const name of SUPABASE_URL_VARS) {
+    const value = normalizeUrl(strip(process.env[name]));
+    if (value && !urls.includes(value)) urls.push(value);
   }
-  out.supabaseUrl = normalizeUrl(out.supabaseUrl);
+  const storedUrl = normalizeUrl(strip(stored.supabaseUrl));
+  if (storedUrl && !urls.includes(storedUrl)) urls.push(storedUrl);
+
+  const keys = [];
+  for (const name of SUPABASE_KEY_VARS) {
+    const value = strip(process.env[name]);
+    if (keyLooksUsable(value) && !keys.includes(value)) keys.push(value);
+  }
+  const storedKey = strip(stored.supabaseKey);
+  if (keyLooksUsable(storedKey) && !keys.includes(storedKey)) keys.push(storedKey);
+
+  const out = [];
+  const seen = new Set();
+  for (const url of urls) {
+    for (const key of keys) {
+      const signature = `${url}|${key}`;
+      if (seen.has(signature)) continue;
+      seen.add(signature);
+      out.push({ url, key, source: envKeySource(url, key) });
+    }
+  }
   return out;
 }
 
-function hint(value, visible = 4) {
-  const raw = String(value || '');
-  if (!raw) return '';
-  if (raw.length <= visible * 2 + 1) return '•'.repeat(raw.length);
-  return `${raw.slice(0, visible)}…${raw.slice(-visible)}`;
+function envKeySource(url, key) {
+  for (const name of SUPABASE_URL_VARS) {
+    if (normalizeUrl(strip(process.env[name])) !== url) continue;
+    for (const keyName of SUPABASE_KEY_VARS) {
+      if (strip(process.env[keyName]) === key) return `${keyName}@${name}`;
+    }
+  }
+  return 'data/settings.json';
+}
+
+/** Primera combinación disponible; el módulo db resuelve la que funciona. */
+function get() {
+  const [first] = supabaseCandidates();
+  return {
+    supabaseUrl: first?.url || '',
+    supabaseKey: first?.key || '',
+  };
+}
+
+/* ------------------------------------------------------------------ cuenta */
+
+function timingEqual(a, b) {
+  const left = Buffer.from(String(a));
+  const right = Buffer.from(String(b));
+  if (left.length !== right.length) return false;
+  return crypto.timingSafeEqual(left, right);
+}
+
+function derive(plain, salt) {
+  return crypto.scryptSync(String(plain), salt, 64).toString('hex');
 }
 
 function envPassword() {
@@ -291,85 +217,6 @@ function accountView() {
   return { username: '', source: 'none' };
 }
 
-/**
- * Vista para el panel: nunca devuelve el secreto completo, solo un preview y un
- * booleano. `env` marca los campos que vienen de variables de entorno y que el
- * panel no puede editar.
- */
-function publicView() {
-  const values = get();
-  const env = {};
-  for (const field of FIELDS) env[field] = fromEnv(field);
-  const view = accountView();
-
-  return {
-    supabaseUrl: values.supabaseUrl,
-    supabaseKeyHint: hint(values.supabaseKey, 6),
-    hasSupabaseKey: Boolean(values.supabaseKey),
-    discordTokenHint: hint(values.discordToken, 4),
-    hasDiscordToken: Boolean(values.discordToken),
-    alertWebhook: values.alertWebhook,
-    selfPresence: values.selfPresence,
-    username: view.username,
-    accountSource: view.source,
-    hasAccount: view.source !== 'none',
-    keys: apiKeys.length,
-    env,
-    configured: {
-      supabase: Boolean(values.supabaseUrl && values.supabaseKey),
-      discord: Boolean(values.discordToken),
-      account: view.source !== 'none',
-    },
-  };
-}
-
-/* --------------------------------------------------------------- escritura */
-
-function update(patch) {
-  load();
-  if (!patch || typeof patch !== 'object') throw invalid('Payload inválido');
-
-  const next = { ...stored };
-  let changed = false;
-
-  for (const field of FIELDS) {
-    if (!Object.prototype.hasOwnProperty.call(patch, field)) continue;
-    if (fromEnv(field)) {
-      throw invalid(`${ENV_NAMES[field]} está definida por variable de entorno y no se puede cambiar desde el panel`);
-    }
-    const value = sanitize(field, patch[field]);
-    if (value) next[field] = value;
-    else delete next[field];
-    changed = true;
-  }
-
-  if (!changed) throw invalid('No hay nada para guardar');
-
-  stored = next;
-  persist();
-  return get();
-}
-
-/* ------------------------------------------------------------------ cuenta */
-
-function timingEqual(a, b) {
-  const left = Buffer.from(String(a));
-  const right = Buffer.from(String(b));
-  if (left.length !== right.length) return false;
-  return crypto.timingSafeEqual(left, right);
-}
-
-function derive(plain, salt) {
-  return crypto.scryptSync(String(plain), salt, 64).toString('hex');
-}
-
-function validatePassword(value) {
-  const plain = String(value ?? '');
-  if (plain.length < MIN_PASSWORD) throw invalid(`La contraseña necesita al menos ${MIN_PASSWORD} caracteres`);
-  if (plain.length > 200) throw invalid('La contraseña es demasiado larga');
-  return plain;
-}
-
 function verifyAccount(username, plain) {
   load();
   const password = envPassword();
@@ -382,142 +229,7 @@ function verifyAccount(username, plain) {
   return timingEqual(derive(plain, account.salt), account.hash);
 }
 
-function createAccount(username, plain) {
-  load();
-  if (hasAccount()) throw invalid('La cuenta ya existe');
-  const name = normalizeUsername(username);
-  const password = validatePassword(plain);
-  const salt = crypto.randomBytes(16).toString('hex');
-  account = { username: name, salt, hash: derive(password, salt) };
-  persist();
-  return { username: name };
-}
-
-function changeAccount(currentPassword, patch) {
-  load();
-  if (envPassword()) {
-    throw invalid('La cuenta viene de DASHBOARD_USERNAME / DASHBOARD_PASSWORD; cambiala en el deploy');
-  }
-  if (!account) throw invalid('Todavía no hay cuenta');
-  if (!timingEqual(derive(currentPassword, account.salt), account.hash)) {
-    throw invalid('La contraseña actual no es correcta');
-  }
-
-  const nextUsername = patch?.username !== undefined && String(patch.username).trim() !== ''
-    ? normalizeUsername(patch.username)
-    : account.username;
-  const nextPassword = patch?.password !== undefined && String(patch.password) !== ''
-    ? validatePassword(patch.password)
-    : null;
-
-  const salt = nextPassword ? crypto.randomBytes(16).toString('hex') : account.salt;
-  account = {
-    username: nextUsername,
-    salt,
-    hash: nextPassword ? derive(nextPassword, salt) : account.hash,
-  };
-  persist();
-  return { username: account.username };
-}
-
-/* --------------------------------------------------------------- api keys */
-
-function keyView(record) {
-  return {
-    id: record.id,
-    name: record.name,
-    prefix: record.prefix,
-    created_at: record.created_at,
-    last_used_at: record.last_used_at,
-  };
-}
-
-function listKeys() {
-  load();
-  return apiKeys.map(keyView);
-}
-
-function createKey(name) {
-  load();
-  if (apiKeys.length >= MAX_KEYS) throw invalid(`Máximo ${MAX_KEYS} keys activas; revocá alguna`);
-  const label = String(name ?? '').trim().slice(0, 60) || 'API key';
-  const token = `${KEY_PREFIX}${crypto.randomBytes(24).toString('base64url')}`;
-  const record = {
-    id: crypto.randomBytes(8).toString('hex'),
-    name: label,
-    prefix: token.slice(0, 12),
-    hash: crypto.createHash('sha256').update(token).digest('hex'),
-    created_at: new Date().toISOString(),
-    last_used_at: null,
-  };
-  apiKeys = [record, ...apiKeys];
-  persist();
-  return { token, key: keyView(record) };
-}
-
-function revokeKey(id) {
-  load();
-  const before = apiKeys.length;
-  apiKeys = apiKeys.filter((record) => record.id !== String(id));
-  if (apiKeys.length === before) throw invalid('Esa key no existe');
-  persist();
-  return true;
-}
-
-function verifyKey(token) {
-  load();
-  const raw = String(token ?? '').trim();
-  if (!raw.startsWith(KEY_PREFIX)) return null;
-  const hash = crypto.createHash('sha256').update(raw).digest('hex');
-  for (const record of apiKeys) {
-    if (!timingEqual(hash, record.hash)) continue;
-    record.last_used_at = new Date().toISOString();
-    schedulePersist();
-    return keyView(record);
-  }
-  return null;
-}
-
-/* ----------------------------------------------------- registration key --- */
-
-/**
- * Key que se pide para crear una cuenta nueva. Se define con ACCESS_KEY (o
- * REGISTRATION_KEY) en el deploy. Si no está, se genera una y se guarda en
- * data/settings.json; queda en el log del arranque para poder usarla una vez.
- * Las cuentas existentes solo necesitan usuario + contraseña + su dispositivo.
- */
-function registrationKey() {
-  load();
-  const env = strip(process.env.ACCESS_KEY || process.env.REGISTRATION_KEY || '');
-  if (env) return env;
-
-  if (typeof stored.registrationKey !== 'string' || stored.registrationKey.length < 16) {
-    stored.registrationKey = `xyb_reg_${crypto.randomBytes(18).toString('base64url')}`;
-    try {
-      persist();
-    } catch {
-      // Sin disco escribible la key vive lo que el proceso; el arranque la loguea.
-    }
-    console.log(`[auth] ACCESS_KEY generada (guardala): ${stored.registrationKey}`);
-  }
-  return stored.registrationKey;
-}
-
-function registrationKeySource() {
-  return strip(process.env.ACCESS_KEY || process.env.REGISTRATION_KEY || '') ? 'env' : 'file';
-}
-
-function registrationKeyView() {
-  return { value: registrationKey(), source: registrationKeySource() };
-}
-
-function verifyRegistrationKey(value) {
-  return timingEqual(strip(value), registrationKey());
-}
-
 /* ---------------------------------------------------------- session secret */
-
-let sessionSecretCache = '';
 
 function sessionSecret() {
   load();
@@ -530,51 +242,33 @@ function sessionSecret() {
   try {
     persist();
   } catch {
-    // Sin disco escribible seguimos con la clave en memoria: las sesiones
-    // duran lo que el proceso, pero el panel funciona.
+    // Disco efímero o de solo lectura: las sesiones duran lo que el proceso.
   }
   return sessionSecretCache;
 }
 
-/* ------------------------------------------------------------------ reset - */
+/* ------------------------------------------------------------------- reset */
 
-/** Solo para tests: vuelve a leer el archivo. */
+/** Solo para tests: vuelve a leer el archivo y el entorno. */
 function __reload() {
   loaded = false;
   stored = {};
   account = null;
-  apiKeys = [];
   sessionSecretCache = '';
-  if (persistTimer) {
-    clearTimeout(persistTimer);
-    persistTimer = null;
-  }
   load();
 }
 
 module.exports = {
   get,
-  update,
-  publicView,
+  supabaseCandidates,
+  strip,
+  normalizeUrl,
+  keyLooksUsable,
   accountView,
   hasAccount,
   verifyAccount,
-  createAccount,
-  changeAccount,
-  listKeys,
-  createKey,
-  revokeKey,
-  verifyKey,
-  registrationKey,
-  registrationKeySource,
-  registrationKeyView,
-  verifyRegistrationKey,
   sessionSecret,
-  normalizeUrl,
-  sanitize,
   DATA_DIR,
   FILE,
-  MIN_PASSWORD,
-  KEY_PREFIX,
   __reload,
 };

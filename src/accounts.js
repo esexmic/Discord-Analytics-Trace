@@ -10,16 +10,16 @@ const settings = require('./settings');
 /**
  * Cuentas del panel.
  *
- * - Con Supabase configurado viven en la tabla `accounts` (schema.sql).
- * - Sin Supabase se guardan en data/accounts.json para que el modo local y los
- *   tests sigan funcionando sin credenciales.
+ * - Con Supabase configurado viven en la tabla `accounts` (schema.sql v2).
+ * - Sin Supabase se guardan en data/accounts.json para el modo local y tests.
  *
- * Cada cuenta tiene un `hwid_hash`: el hash del identificador del navegador que
- * la creó. Un login desde otro dispositivo se rechaza hasta que se desvincule
- * desde Ajustes (contraseña) o se use la cuenta legacy del deploy.
+ * Cada cuenta tiene su propio token de Discord (`discord_token`) y su
+ * identidad vinculada. El token nunca se devuelve al cliente: la vista pública
+ * solo expone si hay token y quién está conectado.
  *
- * Las contraseñas usan scrypt con salt por cuenta. La cuenta legacy (env o
- * data/settings.json) se migra sola a la base la primera vez que se loguea.
+ * HWID: el hash del dispositivo que creó la cuenta. Un login desde otro
+ * dispositivo se rechaza hasta desvincularlo desde Ajustes o recuperarlo con
+ * usuario + contraseña.
  */
 
 const TABLE = 'accounts';
@@ -27,10 +27,12 @@ const FILE = path.join(settings.DATA_DIR, 'accounts.json');
 const MIN_PASSWORD = 8;
 const MAX_PASSWORD = 200;
 const USERNAME_RE = /^[a-z0-9][a-z0-9._-]{2,31}$/;
-const CACHE_MS = 15_000;
+const RECORD_CACHE_MS = 20_000;
+const SESSION_CACHE_MS = 60_000;
 
 let fileCache = null;
 let recordCache = new Map(); // username -> { at, record }
+let sessionCache = new Map(); // username -> { at, version, view }
 let anyCache = { at: 0, value: false };
 
 function authError(message, code = 'invalid') {
@@ -75,6 +77,16 @@ function timingEqual(a, b) {
   return crypto.timingSafeEqual(left, right);
 }
 
+function discordView(record) {
+  if (!record?.discord_token) return { linked: false, user_id: null, username: null, avatar: null };
+  return {
+    linked: true,
+    user_id: record.discord_user_id || null,
+    username: record.discord_username || null,
+    avatar: record.discord_avatar || null,
+  };
+}
+
 function publicView(record) {
   if (!record) return null;
   return {
@@ -85,6 +97,8 @@ function publicView(record) {
     session_version: Number(record.session_version) || 0,
     created_at: record.created_at || null,
     last_login_at: record.last_login_at || null,
+    hasToken: Boolean(record.discord_token),
+    discord: discordView(record),
   };
 }
 
@@ -106,7 +120,7 @@ function readFile() {
 
 function writeFile(records) {
   fs.mkdirSync(path.dirname(FILE), { recursive: true });
-  const payload = JSON.stringify({ version: 1, accounts: records }, null, 2);
+  const payload = JSON.stringify({ version: 2, accounts: records }, null, 2);
   const tmp = `${FILE}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, payload, { mode: 0o600 });
   fs.renameSync(tmp, FILE);
@@ -115,21 +129,35 @@ function writeFile(records) {
 
 function invalidateCache(username) {
   anyCache = { at: 0, value: false };
-  if (username) recordCache.delete(username);
-  else recordCache = new Map();
+  if (username) {
+    recordCache.delete(username);
+    sessionCache.delete(username);
+  } else {
+    recordCache = new Map();
+    sessionCache = new Map();
+  }
 }
 
 function dbError(error) {
   const message = error?.message || 'error desconocido';
+  const code = String(error?.code || '');
+  db.noteFailure(error);
+
+  if (code === 'PGRST204' || /column .* does not exist/i.test(message)) {
+    return authError('Falta correr schema.sql: la tabla accounts no tiene las columnas nuevas', 'schema');
+  }
   if (/does not exist|relation|42P01/i.test(message)) {
-    return authError('Falta la tabla accounts: corré schema.sql en Supabase', 'db_unavailable');
+    return authError('Falta correr schema.sql: la tabla accounts no existe', 'schema');
+  }
+  if (/invalid api key|jwt|401|403|permission/i.test(message)) {
+    return authError('La base rechazó las credenciales del servidor; revisá la service key del deploy', 'db_unavailable');
   }
   return authError(`Base de cuentas no disponible: ${message}`, 'db_unavailable');
 }
 
 async function findRecord(username) {
   const cached = recordCache.get(username);
-  if (cached && Date.now() - cached.at < CACHE_MS) return cached.record;
+  if (cached && Date.now() - cached.at < RECORD_CACHE_MS) return cached.record;
 
   let record = null;
   if (db.isConfigured()) {
@@ -150,10 +178,9 @@ async function findRecord(username) {
 }
 
 async function hasAny() {
-  if (anyCache.at && Date.now() - anyCache.at < CACHE_MS) return anyCache.value;
+  if (anyCache.at && Date.now() - anyCache.at < RECORD_CACHE_MS) return anyCache.value;
 
-  // La cuenta legacy (deploy o settings.json) ya ocupa el lugar del admin: una
-  // cuenta nueva nunca puede nacer como admin aunque la tabla esté vacía.
+  // La cuenta legacy del deploy ya ocupa el lugar del admin.
   if (settings.accountView().source !== 'none') {
     anyCache = { at: Date.now(), value: true };
     return true;
@@ -268,16 +295,23 @@ async function provisionLegacy(username, password, { hwid, hwidLabel, ip } = {})
   }
 }
 
+function hwidLabelName(value) {
+  const label = String(value?.hwidLabel ?? '').trim();
+  return label ? label.slice(0, 120) : null;
+}
+
 /* ---------------------------------------------------------------- público -- */
 
-async function register({ username, password, key, hwid, hwidLabel, ip }) {
-  if (!settings.verifyRegistrationKey(key)) {
-    throw authError('La key de acceso no es válida', 'bad_key');
-  }
-
+/**
+ * Alta abierta: cualquiera que entre a la web puede crear su cuenta. El HWID
+ * ata la cuenta al primer dispositivo; la recuperación pide usuario +
+ * contraseña y revincula.
+ */
+async function register({ username, password, hwid, hwidLabel, ip }) {
   const name = normalizeUsername(username);
   const plain = validatePassword(password);
   const device = validateHwid(hwid);
+  const label = hwidLabelName({ hwidLabel });
 
   if (await findRecord(name)) throw authError('Ese usuario ya existe', 'exists');
 
@@ -286,7 +320,7 @@ async function register({ username, password, key, hwid, hwidLabel, ip }) {
     username: name,
     password: plain,
     hwid: device,
-    hwidLabel,
+    hwidLabel: label,
     role: first ? 'admin' : 'user',
     ip,
   }));
@@ -308,26 +342,23 @@ async function authenticate({ username, password, hwid, hwidLabel, ip } = {}) {
   try {
     record = await findRecord(name);
   } catch (error) {
-    // Sin la tabla accounts la cuenta legacy del deploy tiene que poder entrar
-    // igual: se avisa y se sigue sin migrar hasta que corran schema.sql.
     if (error.code !== 'db_unavailable') throw error;
     console.warn('[accounts]', error.message);
   }
   const legacyOk = settings.verifyAccount(name, plain);
 
-  // La cuenta del deploy (env o data/settings.json) manda: si cambia la
-  // contraseña en Railway tiene que poder entrar aunque en la base quede el
-  // hash viejo. No se le exige HWID para no dejar al admin afuera.
+  // La cuenta del deploy manda: si cambia la contraseña en el entorno tiene
+  // que poder entrar aunque en la base quede el hash viejo.
   if (legacyOk) {
     if (record) {
       await updateRecord(name, { last_login_at: new Date().toISOString(), last_ip: ip || null });
-      return publicView(record);
+      return publicView({ ...record, last_login_at: new Date().toISOString() });
     }
     try {
       const created = await provisionLegacy(name, plain, { hwid, hwidLabel: label, ip });
       return publicView(created);
     } catch (error) {
-      if (error.code !== 'db_unavailable') throw error;
+      if (error.code !== 'db_unavailable' && error.code !== 'schema') throw error;
       console.warn('[accounts] login legacy sin persistir:', error.message);
       return {
         username: name,
@@ -335,6 +366,8 @@ async function authenticate({ username, password, hwid, hwidLabel, ip } = {}) {
         hwid_linked: Boolean(hwid),
         hwid_label: label,
         session_version: 0,
+        hasToken: false,
+        discord: { linked: false },
       };
     }
   }
@@ -346,7 +379,7 @@ async function authenticate({ username, password, hwid, hwidLabel, ip } = {}) {
     const device = String(hwid ?? '').trim().toLowerCase();
     if (record.hwid_hash) {
       if (!device || !timingEqual(hashHwid(device), record.hwid_hash)) {
-        throw authError('Esta cuenta está vinculada a otro dispositivo. Desvinculala desde Ajustes → Cuenta.', 'hwid_mismatch');
+        throw authError('Esta cuenta está vinculada a otro dispositivo. Usá "Cambié de dispositivo" para revincularla.', 'hwid_mismatch');
       }
     } else if (device) {
       const updated = await updateRecord(name, {
@@ -361,11 +394,6 @@ async function authenticate({ username, password, hwid, hwidLabel, ip } = {}) {
   }
 
   throw authError('Usuario o contraseña incorrectos', 'bad_credentials');
-}
-
-function hwidLabelName(value) {
-  const label = String(value?.hwidLabel ?? '').trim();
-  return label ? label.slice(0, 120) : null;
 }
 
 async function changeAccount(username, current, patch = {}) {
@@ -401,14 +429,10 @@ async function changeAccount(username, current, patch = {}) {
 }
 
 /**
- * Recupera una cuenta que quedó atada a un dispositivo que ya no existe
- * (formateo, borrado de datos del navegador). Exige la key de registro además
- * de la contraseña para que no sea un bypass del HWID.
+ * Revincula la cuenta a este dispositivo con usuario + contraseña. No pide
+ * key: la contraseña es la prueba de identidad.
  */
-async function rebindDevice({ username, password, key, hwid, hwidLabel, ip } = {}) {
-  if (!settings.verifyRegistrationKey(key)) {
-    throw authError('La key de acceso no es válida', 'bad_key');
-  }
+async function rebindDevice({ username, password, hwid, hwidLabel, ip } = {}) {
   const name = normalizeUsername(username);
   const plain = String(password ?? '');
   const device = validateHwid(hwid);
@@ -444,32 +468,109 @@ async function resetHwid(username, password) {
   return publicView(updated);
 }
 
+/* ------------------------------------------------------- token de Discord -- */
+
+async function saveDiscord(username, { token, userId, username: discordUsername, avatar }) {
+  const updated = await updateRecord(username, {
+    discord_token: token,
+    discord_user_id: userId || null,
+    discord_username: discordUsername || null,
+    discord_avatar: avatar || null,
+  });
+  if (!updated) throw authError('La cuenta no existe', 'not_found');
+  return updated;
+}
+
+/** Actualiza solo la identidad visible cuando el gateway termina de conectar. */
+async function saveDiscordIdentity(username, { userId, username: discordUsername, avatar }) {
+  const record = await findRecord(username);
+  if (!record?.discord_token) return null;
+  if (record.discord_user_id === userId
+    && record.discord_username === discordUsername
+    && record.discord_avatar === avatar) {
+    return record;
+  }
+  return updateRecord(username, {
+    discord_user_id: userId || null,
+    discord_username: discordUsername || null,
+    discord_avatar: avatar || null,
+  });
+}
+
+async function clearDiscord(username) {
+  const updated = await updateRecord(username, {
+    discord_token: null,
+    discord_user_id: null,
+    discord_username: null,
+    discord_avatar: null,
+  });
+  return updated;
+}
+
+/** Cuentas con token guardado, para reconectar los bots al arrancar. */
+async function listWithTokens() {
+  if (db.isConfigured()) {
+    let response;
+    try {
+      response = await db.getClient()
+        .from(TABLE)
+        .select('username, discord_token')
+        .not('discord_token', 'is', null);
+    } catch (error) {
+      console.warn('[accounts] no se pudo listar los tokens:', error.message);
+      return [];
+    }
+    if (response.error) {
+      console.warn('[accounts] no se pudo listar los tokens:', response.error.message);
+      return [];
+    }
+    return (response.data || []).filter((row) => row.discord_token);
+  }
+
+  return readFile().filter((row) => row.discord_token).map((row) => ({
+    username: row.username,
+    discord_token: row.discord_token,
+  }));
+}
+
+/** Registro completo, uso interno (bot). Nunca se manda al cliente. */
+async function getRecord(username) {
+  return findRecord(String(username ?? '').trim().toLowerCase());
+}
+
 /** Valida que la cuenta siga existiendo y que la sesión no fue revocada. */
 async function validateSession(username, version) {
   const name = String(username ?? '').trim().toLowerCase();
   if (!name) return null;
+  const wanted = Number(version) || 0;
+
+  const cached = sessionCache.get(name);
+  if (cached && cached.version === wanted && Date.now() - cached.at < SESSION_CACHE_MS) {
+    return cached.view;
+  }
+
   let record = null;
   try {
     record = await findRecord(name);
   } catch (error) {
-    if (error.code !== 'db_unavailable') throw error;
+    if (error.code !== 'db_unavailable' && error.code !== 'schema') throw error;
+    if (cached && cached.version === wanted) return cached.view;
     record = null;
   }
+
   if (!record) {
     const legacy = settings.accountView();
     if (legacy.source !== 'none' && legacy.username === name) {
-      return { username: name, role: 'admin', session_version: 0, legacy: true };
+      return { username: name, role: 'admin', session_version: 0, legacy: true, hasToken: false, discord: { linked: false } };
     }
     return null;
   }
-  if ((Number(record.session_version) || 0) !== (Number(version) || 0)) return null;
-  return {
-    username: record.username,
-    role: record.role || 'user',
-    session_version: Number(record.session_version) || 0,
-    hwid_linked: Boolean(record.hwid_hash),
-    hwid_label: record.hwid_label || null,
-  };
+
+  if ((Number(record.session_version) || 0) !== wanted) return null;
+
+  const view = publicView(record);
+  sessionCache.set(name, { at: Date.now(), version: wanted, view });
+  return view;
 }
 
 async function list() {
@@ -484,10 +585,7 @@ async function list() {
       throw dbError(error);
     }
     if (response.error) throw dbError(response.error);
-    return (response.data || []).map((row) => publicView({
-      ...row,
-      hwid_hash: row.hwid_hash,
-    }));
+    return (response.data || []).map((row) => publicView(row));
   }
   return readFile().map(publicView);
 }
@@ -499,6 +597,11 @@ module.exports = {
   rebindDevice,
   resetHwid,
   validateSession,
+  getRecord,
+  saveDiscord,
+  saveDiscordIdentity,
+  clearDiscord,
+  listWithTokens,
   list,
   hasAny,
   publicView,
@@ -508,6 +611,7 @@ module.exports = {
   __reset: () => {
     fileCache = null;
     recordCache = new Map();
+    sessionCache = new Map();
     anyCache = { at: 0, value: false };
   },
 };

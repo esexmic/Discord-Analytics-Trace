@@ -15,7 +15,6 @@ process.env.SUPABASE_URL = 'https://demo.supabase.co';
 process.env.SUPABASE_SERVICE_KEY = 'demo-service-key';
 process.env.DASHBOARD_USERNAME = 'admin';
 process.env.DASHBOARD_PASSWORD = 'demo';
-process.env.ACCESS_KEY = 'demo-key-1234567890';
 process.env.SESSION_SECRET = 'demo-session-secret';
 process.env.TRACK_ALL = 'true';
 process.env.PORT = process.env.DEMO_PORT || '3311';
@@ -26,6 +25,7 @@ const db = require('../src/db');
 const store = new Map();
 store.set('events', []);
 store.set('targets', []);
+store.set('accounts', []);
 
 let nextId = 1;
 db.insertEvents = async (rows) => {
@@ -38,6 +38,7 @@ db.__setClient(createFakeSupabase(store));
 const bot = require('../src/bot');
 const { startServer } = require('../src/server');
 
+const OWNER = 'admin';
 const SELF_ID = '999999999999999999';
 const VALEN = '111111111111111111';
 const SOFI = '222222222222222222';
@@ -97,8 +98,11 @@ const fakeClient = {
   users: { cache: new Map(Object.entries(users)), fetch: async (id) => users[id] ?? null },
 };
 
-bot.__setClient(fakeClient);
-bot.__seed();
+bot.__setClient(OWNER, fakeClient);
+const demoRuntime = bot.__runtime(OWNER);
+demoRuntime.seedPresence();
+demoRuntime.seedVoice();
+demoRuntime.seedProfiles();
 
 const now = Date.now();
 const ago = (minutes) => new Date(now - minutes * 60_000).toISOString();
@@ -287,16 +291,18 @@ const seed = [
 ];
 
 store.get('targets').push(
-  { user_id: VALEN, username: 'Valen', note: 'mi novia', created_at: ago(4000) },
-  { user_id: SOFI, username: 'Sofi', note: 'la ex', created_at: ago(3000) },
-  { user_id: TOMI, username: 'Tomi', note: 'hermano', created_at: ago(2000) }
+  { owner: OWNER, user_id: VALEN, username: 'Valen', note: 'mi novia', created_at: ago(4000) },
+  { owner: OWNER, user_id: SOFI, username: 'Sofi', note: 'la ex', created_at: ago(3000) },
+  { owner: OWNER, user_id: TOMI, username: 'Tomi', note: 'hermano', created_at: ago(2000) }
 );
+
+for (const row of seed) row.owner = OWNER;
 
 db.insertEvents(seed).then(() => {
   const port = Number(process.env.PORT);
   startServer(port);
   console.log(`[demo] datos falsos cargados: ${seed.length} eventos, 3 objetivos`);
-  console.log(`[demo] http://localhost:${port}  ·  admin / demo  ·  key: ${process.env.ACCESS_KEY}`);
+  console.log(`[demo] http://localhost:${port}  ·  usuario: admin  ·  contraseña: demo`);
 });
 
 /* Un evento nuevo cada 30s para ver el feed en vivo (SSE) funcionando. */
@@ -308,6 +314,7 @@ setInterval(() => {
   const text = liveTexts[tick % liveTexts.length];
   tick += 1;
   queue.push({
+    owner: OWNER,
     event_type: 'message',
     message_id: `demo-${Date.now()}`,
     user_id: VALEN,

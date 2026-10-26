@@ -27,6 +27,8 @@ module.exports = {
   port: Number.parseInt(process.env.PORT || '3000', 10),
   trackAll: flag('TRACK_ALL'),
   seedTargets: list(process.env.TARGETS),
+  alertWebhook: String(process.env.ALERT_WEBHOOK || '').trim(),
+  selfPresence: String(process.env.SELF_PRESENCE || '').trim(),
   nodeEnv: process.env.NODE_ENV || 'development',
   isProduction: process.env.NODE_ENV === 'production',
 };
