@@ -304,7 +304,15 @@ async function authenticate({ username, password, hwid, hwidLabel, ip } = {}) {
 
   const plain = String(password ?? '');
   const label = hwidLabelName({ hwidLabel });
-  const record = await findRecord(name);
+  let record = null;
+  try {
+    record = await findRecord(name);
+  } catch (error) {
+    // Sin la tabla accounts la cuenta legacy del deploy tiene que poder entrar
+    // igual: se avisa y se sigue sin migrar hasta que corran schema.sql.
+    if (error.code !== 'db_unavailable') throw error;
+    console.warn('[accounts]', error.message);
+  }
   const legacyOk = settings.verifyAccount(name, plain);
 
   // La cuenta del deploy (env o data/settings.json) manda: si cambia la
@@ -315,8 +323,20 @@ async function authenticate({ username, password, hwid, hwidLabel, ip } = {}) {
       await updateRecord(name, { last_login_at: new Date().toISOString(), last_ip: ip || null });
       return publicView(record);
     }
-    const created = await provisionLegacy(name, plain, { hwid, hwidLabel: label, ip });
-    return publicView(created);
+    try {
+      const created = await provisionLegacy(name, plain, { hwid, hwidLabel: label, ip });
+      return publicView(created);
+    } catch (error) {
+      if (error.code !== 'db_unavailable') throw error;
+      console.warn('[accounts] login legacy sin persistir:', error.message);
+      return {
+        username: name,
+        role: 'admin',
+        hwid_linked: Boolean(hwid),
+        hwid_label: label,
+        session_version: 0,
+      };
+    }
   }
 
   if (record) {
@@ -428,7 +448,13 @@ async function resetHwid(username, password) {
 async function validateSession(username, version) {
   const name = String(username ?? '').trim().toLowerCase();
   if (!name) return null;
-  const record = await findRecord(name);
+  let record = null;
+  try {
+    record = await findRecord(name);
+  } catch (error) {
+    if (error.code !== 'db_unavailable') throw error;
+    record = null;
+  }
   if (!record) {
     const legacy = settings.accountView();
     if (legacy.source !== 'none' && legacy.username === name) {
