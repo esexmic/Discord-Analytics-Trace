@@ -2,12 +2,17 @@
 
 const db = require('./db');
 const config = require('./config');
+const net = require('./net');
 
 const cache = new Set(config.seedTargets);
 // userId -> último username que se mandó a la DB (evita updates repetidos)
 const usernames = new Map();
 let lastLoad = 0;
 let inFlight = null;
+let lastError = null;
+let retryAt = 0;
+
+const RETRY_MS = 30_000;
 
 function seed() {
   for (const id of config.seedTargets) cache.add(id);
@@ -15,34 +20,42 @@ function seed() {
 
 function warn(error) {
   if (error.code === 'not_configured') return;
-  console.error('[targets]', error.message);
+  const message = error.code === 'network' ? net.describe(error) : error.message;
+  if (message === lastError) return;
+  lastError = message;
+  console.error('[targets] no se pudo refrescar:', message);
 }
 
 /**
  * Recarga la lista de targets desde Supabase. Deduplicado: si ya hay un refresh
- * en vuelo, todos los llamadores esperan el mismo.
+ * en vuelo, todos los llamadores esperan el mismo. Tras un fallo de red espera
+ * 30s antes de volver a intentar para no martillar el gateway con la DB caída.
  */
-function refresh() {
+function refresh({ force = false } = {}) {
   if (inFlight) return inFlight;
 
   inFlight = (async () => {
     if (!db.isConfigured()) {
       // Sin Supabase seguimos con los TARGETS del entorno, si hay.
       lastLoad = Date.now();
+      lastError = null;
       return;
     }
+    if (!force && Date.now() < retryAt) return;
 
     let response;
     try {
       response = await db.getClient().from('targets').select('user_id, username');
     } catch (error) {
       warn(error);
+      retryAt = Date.now() + RETRY_MS;
       return;
     }
 
     const { data, error } = response;
     if (error) {
-      console.error('[targets] no se pudo refrescar:', error.message);
+      warn(error);
+      retryAt = Date.now() + RETRY_MS;
       return;
     }
 
@@ -54,6 +67,8 @@ function refresh() {
     }
     seed();
     lastLoad = Date.now();
+    lastError = null;
+    retryAt = 0;
   })().finally(() => {
     inFlight = null;
   });
@@ -96,6 +111,9 @@ async function touch(userId, username) {
 }
 
 async function add(userId, username, note) {
+  if (!db.isConfigured()) {
+    throw Object.assign(new Error('Configurá Supabase para guardar objetivos'), { code: 'not_configured' });
+  }
   const row = { user_id: userId, username: username || null, note: note || null };
   const { error } = await db
     .getClient()
@@ -105,6 +123,8 @@ async function add(userId, username, note) {
   cache.add(userId);
   if (username) usernames.set(userId, username);
   lastLoad = Date.now();
+  retryAt = 0;
+  lastError = null;
 }
 
 async function remove(userId) {
@@ -124,4 +144,12 @@ async function list() {
   return data || [];
 }
 
-module.exports = { isTarget, add, remove, list, refresh, touch };
+module.exports = {
+  isTarget,
+  add,
+  remove,
+  list,
+  refresh,
+  touch,
+  status: () => ({ error: lastError, retryAt, size: cache.size }),
+};

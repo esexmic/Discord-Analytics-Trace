@@ -32,9 +32,28 @@ create index if not exists events_type_idx       on public.events (event_type, c
 create index if not exists events_message_idx    on public.events (message_id, event_type);
 create index if not exists events_guild_idx      on public.events (guild_id, created_at desc);
 
+-- Cuentas del panel. El primer registro es admin y puede ver la key de
+-- registro; los demás son usuarios. La contraseña va con scrypt + salt y el
+-- HWID como sha256 (nunca en claro).
+create table if not exists public.accounts (
+  username         text primary key,
+  role             text not null default 'user',   -- admin | user
+  password_salt    text not null,
+  password_hash    text not null,
+  hwid_hash        text,                            -- sha256 del dispositivo vinculado
+  hwid_label       text,
+  session_version  integer not null default 0,      -- sube al cambiar pass o desvincular HWID
+  created_at       timestamptz not null default now(),
+  last_login_at    timestamptz,
+  last_ip          text
+);
+
+create index if not exists accounts_hwid_idx on public.accounts (hwid_hash);
+
 -- RLS on, cero policies: solo la service_role key (la del bot) puede leer/escribir.
-alter table public.targets enable row level security;
-alter table public.events  enable row level security;
+alter table public.targets  enable row level security;
+alter table public.events   enable row level security;
+alter table public.accounts enable row level security;
 
 -- Retención: borra eventos viejos. Ejecutar a mano, con pg_cron, o desde el SQL
 -- editor de Supabase una vez por semana:

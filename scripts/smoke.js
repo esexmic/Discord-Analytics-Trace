@@ -18,6 +18,7 @@ process.env.SUPABASE_SERVICE_KEY = 'fake-service-key';
 process.env.DASHBOARD_USERNAME = 'tester';
 process.env.DASHBOARD_PASSWORD = 'test-password';
 process.env.SESSION_SECRET = 'test-session-secret';
+process.env.ACCESS_KEY = 'smoke-access-key-123456';
 process.env.TRACK_ALL = 'true';
 process.env.PORT = '0';
 
@@ -321,7 +322,7 @@ test('api: login, auth, summary, targets y eventos', async () => {
   }
 });
 
-test('api: ajustes enmascarados, setup y contraseña protegidos', async () => {
+test('api: ajustes, registro con key y HWID, cuenta legacy protegida', async () => {
   const server = startServer(0);
   await once(server, 'listening');
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -338,12 +339,92 @@ test('api: ajustes enmascarados, setup y contraseña protegidos', async () => {
     const session = await (await fetch(`${base}/api/session`)).json();
     assert.strictEqual(session.needsSetup, false);
 
-    const setup = await fetch(`${base}/api/setup`, {
+    const HWID_A = 'a'.repeat(64);
+    const HWID_B = 'b'.repeat(64);
+    const credentials = { username: 'cuenta', password: 'clave-segura-123' };
+
+    const wrongKey = await fetch(`${base}/api/register`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ username: 'otro', password: 'otra-clave-123' }),
+      body: JSON.stringify({ ...credentials, key: 'key-incorrecta', hwid: HWID_A }),
     });
-    assert.strictEqual(setup.status, 409, 'no se puede reconfigurar la cuenta');
+    assert.strictEqual(wrongKey.status, 403, 'sin la key de acceso no se crea cuenta');
+
+    const register = await fetch(`${base}/api/register`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        ...credentials,
+        key: 'smoke-access-key-123456',
+        hwid: HWID_A,
+        hwid_label: 'Windows · Chrome',
+      }),
+    });
+    assert.strictEqual(register.status, 200);
+    const registered = await register.json();
+    assert.strictEqual(registered.role, 'user', 'el primer admin es la cuenta del deploy');
+
+    const duplicate = await fetch(`${base}/api/register`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...credentials, key: 'smoke-access-key-123456', hwid: HWID_A }),
+    });
+    assert.strictEqual(duplicate.status, 409, 'el usuario no se puede repetir');
+
+    const otherDevice = await fetch(`${base}/api/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...credentials, hwid: HWID_B }),
+    });
+    assert.strictEqual(otherDevice.status, 403, 'la cuenta está atada al primer dispositivo');
+    assert.match((await otherDevice.json()).error, /otro dispositivo/);
+
+    const sameDevice = await fetch(`${base}/api/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...credentials, hwid: HWID_A }),
+    });
+    assert.strictEqual(sameDevice.status, 200);
+
+    const recoverBadKey = await fetch(`${base}/api/recover-device`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...credentials, key: 'mala', hwid: HWID_B }),
+    });
+    assert.strictEqual(recoverBadKey.status, 403, 'la recuperación exige la key de acceso');
+
+    const recover = await fetch(`${base}/api/recover-device`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...credentials, key: 'smoke-access-key-123456', hwid: HWID_B }),
+    });
+    assert.strictEqual(recover.status, 200);
+    const recoverCookie = recover.headers.get('set-cookie').split(';')[0];
+
+    const relinked = await fetch(`${base}/api/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...credentials, hwid: HWID_B }),
+    });
+    assert.strictEqual(relinked.status, 200, 'la cuenta quedó atada al dispositivo nuevo');
+
+    const unlink = await fetch(`${base}/api/account/hwid`, {
+      method: 'DELETE',
+      headers: { cookie: recoverCookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ password: credentials.password }),
+    });
+    assert.strictEqual(unlink.status, 200);
+
+    const afterUnlink = await fetch(`${base}/api/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...credentials, hwid: HWID_A }),
+    });
+    assert.strictEqual(afterUnlink.status, 200, 'desvinculado, se puede entrar desde otro dispositivo');
+
+    const regkey = await (await fetch(`${base}/api/registration-key`, { headers: { cookie } })).json();
+    assert.strictEqual(regkey.value, 'smoke-access-key-123456');
+    assert.strictEqual(regkey.source, 'env');
 
     const view = await (await fetch(`${base}/api/settings`, { headers: { cookie } })).json();
     assert.strictEqual(view.hasDiscordToken, true);

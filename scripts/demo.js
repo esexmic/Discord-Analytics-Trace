@@ -15,6 +15,7 @@ process.env.SUPABASE_URL = 'https://demo.supabase.co';
 process.env.SUPABASE_SERVICE_KEY = 'demo-service-key';
 process.env.DASHBOARD_USERNAME = 'admin';
 process.env.DASHBOARD_PASSWORD = 'demo';
+process.env.ACCESS_KEY = 'demo-key-1234567890';
 process.env.SESSION_SECRET = 'demo-session-secret';
 process.env.TRACK_ALL = 'true';
 process.env.PORT = process.env.DEMO_PORT || '3311';
@@ -295,7 +296,7 @@ db.insertEvents(seed).then(() => {
   const port = Number(process.env.PORT);
   startServer(port);
   console.log(`[demo] datos falsos cargados: ${seed.length} eventos, 3 objetivos`);
-  console.log(`[demo] http://localhost:${port}  ·  admin / demo`);
+  console.log(`[demo] http://localhost:${port}  ·  admin / demo  ·  key: ${process.env.ACCESS_KEY}`);
 });
 
 /* Un evento nuevo cada 30s para ver el feed en vivo (SSE) funcionando. */

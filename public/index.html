@@ -73,7 +73,25 @@
   }
   .login__mark img { width: 100%; height: 100%; object-fit: cover; display: block; }
   .login h1 { font-size: 19px; margin: 0 0 4px; letter-spacing: -0.2px; }
-  .login p { margin: 0 0 22px; color: var(--muted); font-size: 13px; }
+  .login p { margin: 0 0 18px; color: var(--muted); font-size: 13px; }
+  .auth-tabs {
+    display: flex; gap: 6px; padding: 4px; margin-bottom: 14px;
+    background: #0a0c11; border: 1px solid var(--line); border-radius: 10px;
+  }
+  .auth-tab {
+    flex: 1; border: 0; border-radius: 7px; padding: 8px 10px;
+    background: transparent; color: var(--muted);
+    font-size: 12.5px; font-weight: 600;
+    transition: background-color .16s var(--ease-out), color .16s var(--ease-out);
+  }
+  .auth-tab.is-on { background: var(--panel-2); color: var(--text); }
+  .auth-device { margin-top: 12px; font-size: 11.5px; line-height: 1.45; word-break: break-word; }
+  .auth-link {
+    display: block; margin: 12px auto 0; padding: 0;
+    background: none; border: 0; color: var(--muted);
+    font-size: 11.5px; text-decoration: underline; text-underline-offset: 2px;
+  }
+  .auth-link:hover { color: var(--text); }
   .field {
     display: block; width: 100%;
     background: #0a0c11; border: 1px solid var(--line-2);
@@ -480,34 +498,31 @@
 
 <!-- ------------------------------------------------------------------ login -->
 <div id="login" class="login hidden">
-  <form id="login-form" class="login__card" autocomplete="off">
+  <form id="login-form" class="login__card" autocomplete="off" novalidate>
     <div class="login__mark">
       <img src="/logo.jpg" alt="Trace by XYB" width="46" height="46">
     </div>
     <h1>Trace by XYB</h1>
-    <p>Panel de actividad. Entrá con tu usuario y contraseña.</p>
-    <input id="login-username" class="field" type="text" placeholder="usuario" autocomplete="username" autocapitalize="none" spellcheck="false" />
-    <input id="login-password" class="field" type="password" placeholder="contraseña" autocomplete="current-password" style="margin-top:8px" />
-    <button class="btn btn--block" type="submit">Entrar</button>
+    <p id="auth-copy">Entrá con tu usuario y contraseña. La cuenta queda atada a este dispositivo.</p>
+    <div class="auth-tabs" role="tablist">
+      <button class="auth-tab is-on" type="button" data-mode="login">Iniciar sesión</button>
+      <button class="auth-tab" type="button" data-mode="register">Crear cuenta</button>
+    </div>
+    <input id="auth-username" class="field" type="text" placeholder="usuario" autocomplete="username" autocapitalize="none" spellcheck="false" />
+    <input id="auth-password" class="field" type="password" placeholder="contraseña" autocomplete="current-password" style="margin-top:8px" />
+    <div id="auth-register" class="hidden">
+      <input id="auth-repeat" class="field" type="password" placeholder="repetir contraseña" autocomplete="new-password" style="margin-top:8px" />
+      <input id="auth-key" class="field" type="text" placeholder="key de acceso" autocomplete="off" spellcheck="false" style="margin-top:8px" />
+      <div class="hint">La key la entrega el administrador del panel. Solo se usa al crear la cuenta.</div>
+    </div>
+    <button id="auth-submit" class="btn btn--block" type="submit">Entrar</button>
+    <button id="auth-recover-toggle" class="auth-link" type="button">Cambié de dispositivo</button>
+    <div id="auth-recover" class="hidden">
+      <input id="auth-recover-key" class="field" type="text" placeholder="key de acceso" autocomplete="off" spellcheck="false" style="margin-top:8px" />
+      <div class="hint">Con la key de acceso se reata la cuenta a este dispositivo y se cierran las sesiones viejas.</div>
+    </div>
+    <div id="auth-device" class="hint auth-device"></div>
     <div id="login-error" class="error"></div>
-  </form>
-</div>
-
-<!-- ------------------------------------------------------------------ setup -->
-<div id="setup" class="login hidden">
-  <form id="setup-form" class="login__card" autocomplete="off">
-    <div class="login__mark">
-      <img src="/logo.jpg" alt="Trace by XYB" width="46" height="46">
-    </div>
-    <h1>Primer arranque</h1>
-    <p id="setup-copy">Creá la cuenta del panel. Después pegás el token de Discord y las claves de Supabase desde Ajustes.</p>
-    <div id="setup-fields">
-      <input id="setup-username" class="field" type="text" placeholder="usuario (3-32, letras/números)" autocomplete="username" autocapitalize="none" spellcheck="false" />
-      <input id="setup-password" class="field" type="password" placeholder="contraseña (8+ caracteres)" autocomplete="new-password" style="margin-top:8px" />
-      <input id="setup-repeat" class="field" type="password" placeholder="repetir contraseña" autocomplete="new-password" style="margin-top:8px" />
-      <button class="btn btn--block" type="submit">Crear panel</button>
-    </div>
-    <div id="setup-error" class="error"></div>
   </form>
 </div>
 
@@ -694,6 +709,19 @@
         <button id="cfg-pass-save" class="btn btn--mini" type="button">Guardar cuenta</button>
       </div>
       <div id="cfg-pass-msg" class="cfg__msg"></div>
+      <div class="cfg__row" style="align-items:center">
+        <span id="cfg-hwid" class="hint" style="flex:1"></span>
+      </div>
+      <div class="cfg__row">
+        <input id="cfg-hwid-pass" class="small-input" type="password" placeholder="contraseña para desvincular" autocomplete="current-password" />
+        <button id="cfg-hwid-reset" class="btn btn--danger btn--mini" type="button">Desvincular dispositivo</button>
+      </div>
+      <div id="cfg-hwid-msg" class="cfg__msg"></div>
+      <div id="cfg-regkey-row" class="cfg__row hidden">
+        <input id="cfg-regkey" class="small-input" type="text" readonly placeholder="key para crear cuentas" />
+        <button id="cfg-regkey-reveal" class="btn btn--ghost btn--mini" type="button">Ver key</button>
+      </div>
+      <div id="cfg-regkey-msg" class="cfg__msg"></div>
     </section>
 
     <section class="cfg">
@@ -770,6 +798,10 @@
     avatars: {},
     summary: null,
     source: null,
+    authMode: 'login',
+    hwid: '',
+    recover: false,
+    dbErrorAt: 0,
   };
 
   const $ = (sel) => document.querySelector(sel);
@@ -781,6 +813,80 @@
     return String(value ?? '').replace(/[&<>"']/g, (char) => ({
       '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
     }[char]));
+  }
+
+  /* -------------------------------------------------------------- device -- */
+
+  /**
+   * Identificador de dispositivo del navegador: id persistente en localStorage
+   * + huella estable (UA, pantalla, zona, idioma, hardware). El server guarda
+   * solo su sha256 y rechaza el login desde otro equipo.
+   */
+  async function deviceHwid() {
+    if (state.hwid) return state.hwid;
+    let id = '';
+    try {
+      id = localStorage.getItem('xyb_device_id') || '';
+      if (!id) {
+        id = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+        localStorage.setItem('xyb_device_id', id);
+      }
+    } catch {
+      id = `${Date.now()}-${Math.random()}`;
+    }
+
+    const parts = [
+      id,
+      navigator.userAgent,
+      navigator.language,
+      screen.width,
+      screen.height,
+      screen.colorDepth,
+      Intl.DateTimeFormat().resolvedOptions().timeZone,
+      navigator.hardwareConcurrency || 0,
+      navigator.deviceMemory || 0,
+      navigator.platform || '',
+    ];
+    const raw = parts.join('|');
+
+    if (crypto.subtle) {
+      const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(raw));
+      state.hwid = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+    } else {
+      let hash = 2166136261;
+      for (let i = 0; i < raw.length; i += 1) {
+        hash ^= raw.charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
+      }
+      state.hwid = (hash >>> 0).toString(16).padStart(8, '0').repeat(8);
+    }
+    return state.hwid;
+  }
+
+  function deviceLabel() {
+    const ua = navigator.userAgent;
+    const os = /Windows/.test(ua) ? 'Windows'
+      : /Android/.test(ua) ? 'Android'
+        : /iPhone|iPad|iPod/.test(ua) ? 'iOS'
+          : /Mac OS X/.test(ua) ? 'macOS'
+            : /Linux/.test(ua) ? 'Linux' : 'dispositivo';
+    const browser = /Edg\//.test(ua) ? 'Edge'
+      : /OPR\//.test(ua) ? 'Opera'
+        : /Chrome\//.test(ua) ? 'Chrome'
+          : /Firefox\//.test(ua) ? 'Firefox'
+            : /Safari\//.test(ua) ? 'Safari' : 'navegador';
+    return `${os} · ${browser} · ${screen.width}×${screen.height}`;
+  }
+
+  async function updateDeviceNote() {
+    const el = $('#auth-device');
+    el.textContent = 'Identificando dispositivo…';
+    try {
+      const hwid = await deviceHwid();
+      el.textContent = `Dispositivo: ${deviceLabel()} · ${hwid.slice(0, 10)}…`;
+    } catch {
+      el.textContent = '';
+    }
   }
 
   function relative(iso) {
@@ -817,13 +923,22 @@
     toast.timer = setTimeout(() => el.classList.remove('is-on'), 2600);
   }
 
+  // Los endpoints de lectura devuelven 200 con dbError para que el panel siga
+  // usable; avisamos una vez por minuto para no tapar la pantalla.
+  function reportDbError(data) {
+    if (!data?.dbError) return;
+    if (Date.now() - state.dbErrorAt < 60_000) return;
+    state.dbErrorAt = Date.now();
+    toast(`Base de datos: ${data.dbError}`);
+  }
+
   async function api(path, options = {}) {
     const res = await fetch(path, {
       credentials: 'same-origin',
       headers: options.body ? { 'Content-Type': 'application/json' } : undefined,
       ...options,
     });
-    if (res.status === 401 && path !== '/api/login') {
+    if (res.status === 401 && !['/api/login', '/api/register', '/api/recover-device', '/api/session'].includes(path)) {
       showLogin();
       throw new Error('Sesión expirada');
     }
@@ -1042,6 +1157,7 @@
     if (state.q) params.set('q', state.q);
 
     const data = await api('/api/events?' + params.toString());
+    reportDbError(data);
     const seen = new Set(state.events.map((event) => String(event.id)));
     const fresh = data.events.filter((event) => !seen.has(String(event.id)));
     state.events = state.events.concat(fresh);
@@ -1054,6 +1170,7 @@
 
   async function loadSummary() {
     const data = await api('/api/summary');
+    reportDbError(data);
     state.summary = data;
     state.presence = data.presence || {};
     state.details = data.activity || {};
@@ -1083,6 +1200,7 @@
 
   async function loadTargets() {
     const data = await api('/api/targets');
+    reportDbError(data);
     state.targets = data.targets;
     renderTargets();
   }
@@ -1221,28 +1339,56 @@
     picker.innerHTML = state.guilds.map((guild) => `<option value="${esc(guild.id)}">${esc(guild.name)}</option>`).join('');
   }
 
-  function showLogin() {
+  function setRecover(on) {
+    state.recover = Boolean(on);
+    $('#auth-recover').classList.toggle('hidden', !state.recover);
+    $('#auth-recover-toggle').classList.toggle('hidden', state.authMode === 'register');
+    $('#auth-recover-toggle').textContent = state.recover ? 'Cancelar recuperación' : 'Cambié de dispositivo';
+    $('#auth-submit').textContent = state.recover
+      ? 'Desvincular y entrar'
+      : state.authMode === 'register' ? 'Crear cuenta' : 'Entrar';
+    if (state.recover) $('#auth-recover-key').focus();
+  }
+
+  function setAuthMode(mode) {
+    state.authMode = mode === 'register' ? 'register' : 'login';
+    setRecover(false);
+    document.querySelectorAll('.auth-tab').forEach((tab) => {
+      tab.classList.toggle('is-on', tab.dataset.mode === state.authMode);
+    });
+    $('#auth-register').classList.toggle('hidden', state.authMode !== 'register');
+    $('#auth-submit').textContent = state.authMode === 'register' ? 'Crear cuenta' : 'Entrar';
+    $('#auth-copy').textContent = state.authMode === 'register'
+      ? 'Creá tu cuenta con la key de acceso. Queda atada a este dispositivo.'
+      : 'Entrá con tu usuario y contraseña. La cuenta queda atada a este dispositivo.';
+    $('#auth-password').setAttribute(
+      'autocomplete',
+      state.authMode === 'register' ? 'new-password' : 'current-password'
+    );
+    $('#login-error').textContent = '';
+  }
+
+  function showLogin(mode = 'login', message = '') {
     state.authed = false;
     if (state.source) { state.source.close(); state.source = null; }
     $('#app').classList.add('hidden');
-    $('#setup').classList.add('hidden');
     $('#login').classList.remove('hidden');
-    $('#login-username').focus();
+    setAuthMode(mode);
+
+    let last = '';
+    try { last = localStorage.getItem('xyb_last_user') || ''; } catch { last = ''; }
+    if (last) $('#auth-username').value = last;
+
+    $('#login-error').textContent = message;
+    if (last) $('#auth-password').focus();
+    else $('#auth-username').focus();
+    void updateDeviceNote();
   }
 
   function showApp() {
     state.authed = true;
     $('#login').classList.add('hidden');
-    $('#setup').classList.add('hidden');
     $('#app').classList.remove('hidden');
-  }
-
-  function showSetup() {
-    state.authed = false;
-    $('#login').classList.add('hidden');
-    $('#app').classList.add('hidden');
-    $('#setup').classList.remove('hidden');
-    $('#setup-username').focus();
   }
 
   async function boot() {
@@ -1286,16 +1432,92 @@
 
   $('#login-form').addEventListener('submit', async (event) => {
     event.preventDefault();
-    const username = $('#login-username').value.trim();
-    const password = $('#login-password').value;
+    const username = $('#auth-username').value.trim();
+    const password = $('#auth-password').value;
+    const register = state.authMode === 'register';
+    const recovering = state.recover;
     $('#login-error').textContent = '';
+
+    if (!username || !password) {
+      $('#login-error').textContent = 'Completá usuario y contraseña';
+      return;
+    }
+    if (recovering) {
+      if (!$('#auth-recover-key').value.trim()) {
+        $('#login-error').textContent = 'Pegá la key de acceso para reatar la cuenta';
+        return;
+      }
+    } else if (register) {
+      if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{2,31}$/.test(username)) {
+        $('#login-error').textContent = 'Usuario: 3 a 32 caracteres, letras, números, punto, guion o guion bajo';
+        return;
+      }
+      if (password.length < 8) {
+        $('#login-error').textContent = 'La contraseña necesita 8 caracteres o más';
+        return;
+      }
+      if (password !== $('#auth-repeat').value) {
+        $('#login-error').textContent = 'Las contraseñas no coinciden';
+        return;
+      }
+      if (!$('#auth-key').value.trim()) {
+        $('#login-error').textContent = 'Pegá la key de acceso';
+        return;
+      }
+    }
+
+    $('#auth-submit').disabled = true;
     try {
-      await api('/api/login', { method: 'POST', body: JSON.stringify({ username, password }) });
-      $('#login-password').value = '';
+      const hwid = await deviceHwid();
+      const body = {
+        username,
+        password,
+        hwid,
+        hwid_label: deviceLabel(),
+      };
+      if (register) body.key = $('#auth-key').value.trim();
+      if (recovering) body.key = $('#auth-recover-key').value.trim();
+
+      const endpoint = recovering ? '/api/recover-device' : register ? '/api/register' : '/api/login';
+      await api(endpoint, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
+
+      try { localStorage.setItem('xyb_last_user', username); } catch { /* modo privado */ }
+      $('#auth-password').value = '';
+      $('#auth-repeat').value = '';
+      $('#auth-key').value = '';
+      $('#auth-recover-key').value = '';
+      setRecover(false);
       await boot();
+      if (register) {
+        toast('Cuenta creada');
+        await openSettings();
+      } else if (recovering) {
+        toast('Dispositivo vinculado');
+      }
     } catch (error) {
       $('#login-error').textContent = error.message;
+      if (/vinculada a otro dispositivo/i.test(error.message)) {
+        $('#auth-copy').textContent = 'Esa cuenta ya está atada a otro dispositivo. Desvinculala desde Ajustes → Cuenta en el equipo original.';
+      }
+    } finally {
+      $('#auth-submit').disabled = false;
     }
+  });
+
+  document.querySelectorAll('.auth-tab').forEach((tab) => {
+    tab.addEventListener('click', () => {
+      setAuthMode(tab.dataset.mode);
+      if (tab.dataset.mode === 'register') $('#auth-key').focus();
+      else $('#auth-password').focus();
+    });
+  });
+
+  $('#auth-recover-toggle').addEventListener('click', () => {
+    setRecover(!state.recover);
+    if (!state.recover) $('#auth-password').focus();
   });
 
   $('#logout').addEventListener('click', async () => {
@@ -1526,16 +1748,27 @@
     $('#cfg-presence').value = view.selfPresence || '';
 
     const source = view.accountSource;
+    const sourceLabel = source === 'env' ? 'variable de entorno'
+      : source === 'database' ? 'base de datos' : 'cuenta local';
     pill(
       '#cfg-pass-source',
-      source === 'env' ? 'variable de entorno' : source === 'file' ? 'guardada' : 'sin cuenta',
-      source === 'env' ? 'env' : source === 'file' ? 'on' : 'off'
+      sourceLabel,
+      source === 'env' ? 'env' : source === 'database' ? 'on' : 'off'
     );
     $('#cfg-account-username').value = view.username || '';
     $('#cfg-account-username').disabled = source === 'env';
     $('#cfg-pass-current').disabled = source === 'env';
     $('#cfg-pass-next').disabled = source === 'env';
     $('#cfg-pass-save').disabled = source === 'env';
+
+    const linked = Boolean(view.hwidLinked);
+    $('#cfg-hwid').textContent = linked
+      ? `Dispositivo vinculado: ${view.hwidLabel || 'este equipo'}`
+      : 'Dispositivo sin vincular: se vincula en el próximo inicio de sesión.';
+    $('#cfg-hwid-pass').disabled = !linked || source === 'env';
+    $('#cfg-hwid-reset').disabled = !linked || source === 'env';
+    $('#cfg-regkey-row').classList.toggle('hidden', view.role !== 'admin');
+
     pill('#cfg-keys-count', String(view.keys ?? 0), view.keys ? 'on' : '');
 
     $('#cfg-meta').textContent = view.trackAll
@@ -1785,34 +2018,40 @@
     }
   });
 
-  $('#setup-form').addEventListener('submit', async (event) => {
-    event.preventDefault();
-    const username = $('#setup-username').value.trim();
-    const password = $('#setup-password').value;
-    const repeat = $('#setup-repeat').value;
-    $('#setup-error').textContent = '';
-    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{2,31}$/.test(username)) {
-      $('#setup-error').textContent = 'Usuario: 3 a 32 caracteres, letras, números, punto, guion o guion bajo';
-      return;
-    }
-    if (password.length < 8) { $('#setup-error').textContent = 'Mínimo 8 caracteres'; return; }
-    if (password !== repeat) { $('#setup-error').textContent = 'Las contraseñas no coinciden'; return; }
+  $('#cfg-hwid-reset').addEventListener('click', async () => {
+    const password = $('#cfg-hwid-pass').value;
+    if (!password) return setMsg('#cfg-hwid-msg', 'Poné la contraseña para confirmar', 'bad');
+    if (!confirm('Se desvincula este dispositivo y se cierran todas las sesiones de la cuenta. ¿Seguir?')) return;
 
+    setMsg('#cfg-hwid-msg', 'Desvinculando…', 'busy');
     try {
-      const response = await fetch('/api/setup', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password }),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data.error || 'No se pudo crear la cuenta');
-      $('#setup-username').value = '';
-      $('#setup-password').value = '';
-      $('#setup-repeat').value = '';
-      await boot();
-      await openSettings();
+      await api('/api/account/hwid', { method: 'DELETE', body: JSON.stringify({ password }) });
+      $('#cfg-hwid-pass').value = '';
+      setMsg('#cfg-hwid-msg', 'Dispositivo desvinculado', 'ok');
+      setTimeout(() => {
+        $('#settings').close();
+        showLogin('login', 'Dispositivo desvinculado: iniciá sesión otra vez.');
+      }, 900);
     } catch (error) {
-      $('#setup-error').textContent = error.message;
+      setMsg('#cfg-hwid-msg', error.message, 'bad');
+    }
+  });
+
+  $('#cfg-regkey-reveal').addEventListener('click', async () => {
+    setMsg('#cfg-regkey-msg', 'Buscando…', 'busy');
+    try {
+      const data = await api('/api/registration-key');
+      $('#cfg-regkey').value = data.value || '';
+      const source = data.source === 'env' ? 'definida en ACCESS_KEY' : 'generada por el panel';
+      setMsg('#cfg-regkey-msg', `Key ${source}: compartila solo con quien deba crear cuenta.`, 'ok');
+      try {
+        await navigator.clipboard.writeText(data.value || '');
+        setMsg('#cfg-regkey-msg', `Key ${source}. Copiada al portapapeles.`, 'ok');
+      } catch {
+        // sin permiso de portapapeles queda visible en el campo
+      }
+    } catch (error) {
+      setMsg('#cfg-regkey-msg', error.message, 'bad');
     }
   });
 
@@ -1826,7 +2065,11 @@
         return;
       }
       if (session.needsSetup) {
-        showSetup();
+        showLogin('register', 'Primera cuenta del panel: usá la key de acceso configurada en el deploy.');
+        return;
+      }
+      if (session.dbError) {
+        showLogin('login', `Base de cuentas no disponible: ${session.dbError}`);
         return;
       }
     } catch {

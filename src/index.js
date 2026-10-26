@@ -40,6 +40,13 @@ if (!db.isConfigured()) {
   console.log('[app] Supabase sin configurar: el panel arranca en modo setup');
 }
 
+// Sin ACCESS_KEY la key de registro vive en el disco (efímero en Railway).
+// Dejarla en el log permite crear la primera cuenta aunque el panel todavía
+// no tenga admin. Con ACCESS_KEY definida no se imprime nada.
+if (!process.env.ACCESS_KEY && !process.env.REGISTRATION_KEY) {
+  console.log(`[auth] key de acceso para crear cuentas: ${settings.registrationKey()}`);
+}
+
 void bootBot();
 
 async function shutdown(signal) {

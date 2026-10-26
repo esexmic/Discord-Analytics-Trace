@@ -146,8 +146,16 @@ function schedulePersist() {
 
 /* -------------------------------------------------------------- validación */
 
+/** Copiar/pegar desde el panel de Railway suele arrastrar comillas o saltos. */
+function strip(value) {
+  return String(value ?? '')
+    .trim()
+    .replace(/^["'`]+|["'`]+$/g, '')
+    .trim();
+}
+
 function envValue(field) {
-  return String(process.env[ENV_NAMES[field]] || '').trim();
+  return strip(process.env[ENV_NAMES[field]] || '');
 }
 
 function fromEnv(field) {
@@ -249,7 +257,7 @@ function get() {
   const out = {};
   for (const field of FIELDS) {
     const env = envValue(field);
-    out[field] = env || String(stored[field] ?? '').trim();
+    out[field] = env || strip(stored[field]);
   }
   out.supabaseUrl = normalizeUrl(out.supabaseUrl);
   return out;
@@ -470,6 +478,43 @@ function verifyKey(token) {
   return null;
 }
 
+/* ----------------------------------------------------- registration key --- */
+
+/**
+ * Key que se pide para crear una cuenta nueva. Se define con ACCESS_KEY (o
+ * REGISTRATION_KEY) en el deploy. Si no está, se genera una y se guarda en
+ * data/settings.json; queda en el log del arranque para poder usarla una vez.
+ * Las cuentas existentes solo necesitan usuario + contraseña + su dispositivo.
+ */
+function registrationKey() {
+  load();
+  const env = strip(process.env.ACCESS_KEY || process.env.REGISTRATION_KEY || '');
+  if (env) return env;
+
+  if (typeof stored.registrationKey !== 'string' || stored.registrationKey.length < 16) {
+    stored.registrationKey = `xyb_reg_${crypto.randomBytes(18).toString('base64url')}`;
+    try {
+      persist();
+    } catch {
+      // Sin disco escribible la key vive lo que el proceso; el arranque la loguea.
+    }
+    console.log(`[auth] ACCESS_KEY generada (guardala): ${stored.registrationKey}`);
+  }
+  return stored.registrationKey;
+}
+
+function registrationKeySource() {
+  return strip(process.env.ACCESS_KEY || process.env.REGISTRATION_KEY || '') ? 'env' : 'file';
+}
+
+function registrationKeyView() {
+  return { value: registrationKey(), source: registrationKeySource() };
+}
+
+function verifyRegistrationKey(value) {
+  return timingEqual(strip(value), registrationKey());
+}
+
 /* ---------------------------------------------------------- session secret */
 
 let sessionSecretCache = '';
@@ -520,6 +565,10 @@ module.exports = {
   createKey,
   revokeKey,
   verifyKey,
+  registrationKey,
+  registrationKeySource,
+  registrationKeyView,
+  verifyRegistrationKey,
   sessionSecret,
   normalizeUrl,
   sanitize,

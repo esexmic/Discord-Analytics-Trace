@@ -112,6 +112,29 @@ TEXTOS DE INTERFAZ
 - "Crear key", "Copiar", "Revocar", "Key creada", "Key revocada".
 - "Copiala ahora: no se vuelve a mostrar."
 
+------------------------------------------------------------
+v1.3 — 26/10/2026
+------------------------------------------------------------
+
+LOGIN
+- Dos solapas: "Iniciar sesión" y "Crear cuenta" (.auth-tabs / .auth-tab).
+- Login pide usuario y contraseña; registro agrega repetir contraseña y key.
+- Enlace "Cambié de dispositivo" debajo del botón: despliega el campo de key
+  para reatar la cuenta y avisa "Cancelar recuperación" cuando está activo.
+- El botón cambia de texto según el modo: "Entrar", "Crear cuenta" o
+  "Desvincular y entrar".
+- Línea de dispositivo (#auth-device): sistema · navegador · resolución y los
+  primeros caracteres del HWID, para saber qué equipo está vinculado.
+
+AJUSTES → CUENTA
+- Pill de origen de la cuenta: "variable de entorno", "base de datos" o
+  "cuenta local".
+- Campo de usuario y contraseñas deshabilitados cuando la cuenta viene de
+  variables de entorno.
+- Dispositivo vinculado con su etiqueta; "Desvincular dispositivo" pide la
+  contraseña.
+- Fila de key de acceso visible solo para rol admin.
+
 PENDIENTE PARA LA PÁGINA WEB FUTURA
 - Exponer nombre de marca y subtítulo.
 - Exponer logo y favicon (subida de archivo).

@@ -31,11 +31,13 @@ Los mensajes solo se ven en servidores mutuos (es lo único a lo que la cuenta t
 - Railway para el host — free trial / Hobby
 
 ```
-schema.sql              tablas + índices + RLS + prune_events
-src/settings.js         cuenta, API keys y configuración en caliente (env + data/settings.json)
+schema.sql              tablas (targets, events, accounts) + índices + RLS + prune_events
+src/settings.js         API keys, key de registro y configuración en caliente (env + data/settings.json)
+src/accounts.js         cuentas, scrypt, HWID y sesiones (Supabase o data/accounts.json)
+src/net.js              fetch con deadline, reintentos y causa real del error
 src/config.js           perillas de arranque (puerto, TRACK_ALL, targets semilla)
-src/db.js               cliente Supabase perezoso + insert batch
-src/targets.js          cache de objetivos (refresh cada 20s)
+src/db.js               cliente Supabase perezoso + probe + insert batch
+src/targets.js          cache de objetivos (refresh cada 20s, backoff si falla)
 src/queue.js            buffer de escritura (40 eventos / 700ms)
 src/bot.js              gateway: presencia, mensajes, edits, voz, connect/disconnect
 src/server.js           API + auth por cookie + SSE + endpoints de ajustes
@@ -54,7 +56,7 @@ npm install
 npm start
 ```
 
-Abrí `http://localhost:3000`. En el primer arranque el panel pide **crear la cuenta** (usuario + contraseña); después abre solo la ventana de **Ajustes** para pegar:
+Abrí `http://localhost:3000`. En el primer arranque el panel pide **crear la cuenta** (usuario + contraseña + **key de acceso**); después abre solo la ventana de **Ajustes** para pegar:
 
 1. **Discord** → token de la cuenta que mira → *Guardar y conectar*.
 2. **Supabase** → Project URL + secret key → *Guardar* → *Probar conexión*.
@@ -68,9 +70,20 @@ Todo eso queda guardado en `data/settings.json` (modo 600, fuera del repo). El t
 
 Si una variable está definida (por ejemplo `DISCORD_TOKEN` en Railway), el panel la muestra en amarillo como *definida por variable de entorno* y no deja pisarla. Es a propósito: en un deploy las env son la verdad.
 
-### Cuenta y primer arranque
+### Cuenta, key de acceso y HWID
 
-Si no hay cuenta, el panel muestra el asistente para crearla desde la web, venga de donde venga el request. La ventana se cierra sola en cuanto la cuenta existe: el siguiente request ya pide login. En un deploy con disco efímero, definí `DASHBOARD_USERNAME` y `DASHBOARD_PASSWORD` por entorno para no perder el acceso en cada redeploy (o montá un volumen en `data/`).
+Las cuentas viven en la tabla `accounts` de Supabase (con `data/accounts.json` como fallback local). Para **crear una cuenta** hacen falta usuario, contraseña y la **key de acceso**:
+
+- Definila en el deploy con `ACCESS_KEY` (o `REGISTRATION_KEY`). Es la que repartís.
+- Si no la definís, el server genera una y la imprime en el log del arranque (`[auth] ACCESS_KEY generada…`). También la puede revelar un admin desde **Ajustes → Cuenta → Ver key**.
+
+Cada cuenta queda **atada al dispositivo** que la creó: el navegador calcula un identificador estable (`localStorage` + huella del navegador) y el server guarda solo su sha256. Un login desde otro dispositivo devuelve *“Esta cuenta está vinculada a otro dispositivo”*.
+
+- Para mover una cuenta de equipo: **Ajustes → Cuenta → Desvincular dispositivo** (pide la contraseña) y volver a entrar.
+- Si el equipo original ya no existe, en el login está **“Cambié de dispositivo”**: con usuario + contraseña + key de acceso se reata la cuenta al equipo nuevo. Ese proceso cierra las sesiones viejas.
+- Cambiar la contraseña o desvincular el HWID sube `session_version`, así que las cookies anteriores dejan de valer.
+
+`DASHBOARD_USERNAME` / `DASHBOARD_PASSWORD` siguen funcionando como **cuenta legacy del deploy**: entran sin HWID y se migran solas a la base en el primer login. La contraseña de esa cuenta se cambia en las variables del deploy, no desde el panel. Si no usás esas variables y el disco es efímero, igual no perdés el acceso: las cuentas y el HWID quedan en Supabase (corré `schema.sql`).
 
 ### API keys
 
@@ -87,7 +100,7 @@ curl -H "Authorization: Bearer xyb_..." https://tu-deploy/api/events?limit=20
 npm run demo
 ```
 
-Abre `http://localhost:3311`, usuario `admin`, contraseña `demo`. Carga 3 objetivos de mentira, eventos de todos los tipos y un mensaje nuevo cada 30s para ver el feed en vivo. No toca Supabase ni Discord.
+Abre `http://localhost:3311`, usuario `admin`, contraseña `demo` (key de registro: `demo-key-1234567890`). Carga 3 objetivos de mentira, eventos de todos los tipos y un mensaje nuevo cada 30s para ver el feed en vivo. No toca Supabase ni Discord.
 
 ## 1. Supabase
 
@@ -144,13 +157,23 @@ En el panel, click en un objetivo filtra todo el feed por esa persona.
 
 1. Subir el repo a GitHub.
 2. Railway → **New Project → Deploy from GitHub repo**.
-3. Variables (Service → Variables): `DISCORD_TOKEN`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `DASHBOARD_USERNAME`, `DASHBOARD_PASSWORD`, `SESSION_SECRET`.
+3. Variables (Service → Variables): `DISCORD_TOKEN`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `ACCESS_KEY`, `SESSION_SECRET`. Opcionalmente `DASHBOARD_USERNAME` + `DASHBOARD_PASSWORD` como cuenta legacy de respaldo.
 4. Railway inyecta `PORT` solo. `railway.json` ya define `npm start`, healthcheck en `/health` y restart on failure.
 5. **Settings → Networking → Generate Domain** para tener URL pública.
 
 No hace falta build step: Nixpacks detecta Node y corre `npm install`.
 
-**Persistencia**: el filesystem de Railway es efímero. Si configurás desde el panel, montá un **Volume** en `/app/data` (o definí `DATA_DIR` apuntando al volumen). Si configurás todo por variables de entorno, no hace falta volumen: el archivo solo guarda la cuenta, las API keys y la clave de sesión.
+**Persistencia**: el filesystem de Railway es efímero. Las cuentas, objetivos y eventos viven en Supabase; en `data/` solo quedan las API keys, la configuración cargada desde el panel y la key de registro autogenerada. Si usás el panel para cargar credenciales, montá un **Volume** en `/app/data` (o definí `DATA_DIR`) o pasá todo por variables de entorno. Para que la key de registro sobreviva a los redeploys, definí `ACCESS_KEY`.
+
+### Si aparece `TypeError: fetch failed`
+
+El server ahora envuelve todas las llamadas a Supabase con deadline y reintentos, y describe la causa real (`ENOTFOUND`, `EAI_AGAIN`, `ECONNRESET`, timeout). Si el panel muestra *“Base de datos: …”* o los logs dicen `[targets] no se pudo refrescar`:
+
+1. **Ajustes → Supabase → Probar conexión**. El botón pega contra `GET /rest/v1/targets` y distingue URL inválida, key rechazada y tabla faltante.
+2. Verificá que `SUPABASE_URL` sea la **Project URL** (`https://<ref>.supabase.co`), no la conexión directa `db.<ref>.supabase.co` ni el pooler.
+3. Verificá que `SUPABASE_SERVICE_KEY` sea la **service_role** (no la publishable/anon).
+4. Corré `schema.sql` completo: si falta la tabla `accounts` o `targets`, el panel lo dice.
+5. `GET /health` devuelve `db`, `bot` y `targetsError` para ver el estado sin entrar al panel.
 
 ---
 
@@ -163,8 +186,10 @@ Todas son opcionales: sin ninguna, el panel arranca en modo setup.
 | `DISCORD_TOKEN` | user token de la cuenta que mira (bloquea el campo en el panel) |
 | `SUPABASE_URL` | URL del proyecto Supabase |
 | `SUPABASE_SERVICE_KEY` | service_role key |
-| `DASHBOARD_USERNAME` | usuario del panel (por defecto `admin` si hay `DASHBOARD_PASSWORD`) |
-| `DASHBOARD_PASSWORD` | contraseña del panel (si falta, la cuenta se crea en la interfaz) |
+| `ACCESS_KEY` | key que se pide para crear cuentas nuevas (si falta se genera y se loguea) |
+| `REGISTRATION_KEY` | alias de `ACCESS_KEY` |
+| `DASHBOARD_USERNAME` | cuenta legacy del deploy (por defecto `admin` si hay `DASHBOARD_PASSWORD`) |
+| `DASHBOARD_PASSWORD` | contraseña de la cuenta legacy; entra sin HWID y se migra a la base |
 | `SESSION_SECRET` | firma de la cookie; si falta se genera y se guarda en `data/settings.json` |
 | `PORT` | 3000 por defecto; Railway lo inyecta |
 | `TRACK_ALL` | `true` = loguear todos, no solo los targets |
@@ -178,11 +203,15 @@ Todas son opcionales: sin ninguna, el panel arranca en modo setup.
 | Método | Ruta | Para qué |
 |---|---|---|
 | GET | `/api/setup` | estado del primer arranque (`needsSetup`) |
-| POST | `/api/setup` | crear la cuenta inicial `{ username, password }` |
-| POST | `/api/login` | `{ username, password }` → cookie firmada 7 días |
+| POST | `/api/register` | `{ username, password, key, hwid, hwid_label }` → crear cuenta y cookie |
+| POST | `/api/setup` | alias histórico de `/api/register` |
+| POST | `/api/login` | `{ username, password, hwid, hwid_label }` → cookie firmada 7 días |
+| POST | `/api/recover-device` | `{ username, password, key, hwid }` → reatar la cuenta a otro dispositivo |
 | POST | `/api/logout` | cerrar sesión |
 | GET | `/api/session` | chequear sesión (`authType`), usuario y si falta setup |
+| GET | `/api/registration-key` | ver la key de acceso (solo admin y cookie) |
 | POST | `/api/account` | `{ username, current, password }` → cambiar usuario/contraseña (solo cookie) |
+| DELETE | `/api/account/hwid` | `{ password }` → desvincular el dispositivo y cerrar sesiones (solo cookie) |
 | GET/POST/DELETE | `/api/keys` | crear, listar y revocar API keys (solo cookie) |
 | GET | `/api/settings` | configuración enmascarada + estado del bot (solo cookie) |
 | PUT | `/api/settings` | guardar token/keys/webhook/presencia (reconecta en caliente, solo cookie) |
@@ -210,5 +239,6 @@ Todas son opcionales: sin ninguna, el panel arranca en modo setup.
   ```sql
   select cron.schedule('prune-events', '0 3 * * *', $$select prune_events(90)$$);
   ```
-- **Seguridad del dashboard**: cookie HMAC HttpOnly (+ `Secure` detrás de HTTPS), cuenta con scrypt (usuario + contraseña), API keys hasheadas con sha256 y visibles una sola vez, rate limit de login (10/min por IP), `noindex`, secretos enmascarados en la API.
+- **Seguridad del dashboard**: cookie HMAC HttpOnly (+ `Secure` detrás de HTTPS) con `session_version` revocable, contraseñas con scrypt + salt, HWID como sha256, API keys hasheadas con sha256 y visibles una sola vez, rate limit de intentos fallidos (10/min por IP), `noindex`, secretos enmascarados en la API.
+- **Red resiliente**: `src/net.js` pone deadline de 12s y reintenta solo conexiones que todavía no se establecieron (no duplica escrituras). `targets.refresh` entra en backoff de 30s tras un fallo y el panel muestra el error real en vez de quedar mudo.
 - **Webhook opcional**: `ALERT_WEBHOOK` manda un mensaje a un webhook de Discord en cada conexión/desconexión, entrada/salida de voz y stream.
