@@ -1,4 +1,4 @@
--- Watchtower schema
+-- XYB schema
 -- Ejecutar completo en Supabase > SQL Editor > New query > Run
 
 create extension if not exists pgcrypto;

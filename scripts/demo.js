@@ -3,16 +3,17 @@
 /**
  * Demo local con datos falsos: no toca Supabase ni Discord.
  *
- *   npm run demo        ->  http://localhost:3311  (password: demo)
+ *   npm run demo        ->  http://localhost:3311  (admin / demo)
  */
 
 const os = require('os');
 const path = require('path');
 
-process.env.DATA_DIR = path.join(os.tmpdir(), `watchtower-demo-${process.pid}`);
+process.env.DATA_DIR = path.join(os.tmpdir(), `XYB-demo-${process.pid}`);
 process.env.DISCORD_TOKEN = 'demo.token.value.demo.token.value.demo';
 process.env.SUPABASE_URL = 'https://demo.supabase.co';
 process.env.SUPABASE_SERVICE_KEY = 'demo-service-key';
+process.env.DASHBOARD_USERNAME = 'admin';
 process.env.DASHBOARD_PASSWORD = 'demo';
 process.env.SESSION_SECRET = 'demo-session-secret';
 process.env.TRACK_ALL = 'true';
@@ -78,7 +79,7 @@ guildA.presences.cache.set(VALEN, {
 guildA.presences.cache.set(SOFI, {
   userId: SOFI,
   status: 'dnd',
-  activities: [{ type: 0, name: 'Visual Studio Code', details: 'editando watchtower' }],
+  activities: [{ type: 0, name: 'Visual Studio Code', details: 'editando XYB' }],
   clientStatus: { desktop: 'online' },
 });
 guildA.voiceStates.cache.set(VALEN, {
@@ -103,7 +104,43 @@ const ago = (minutes) => new Date(now - minutes * 60_000).toISOString();
 
 const name = (id) => users[id].globalName;
 
+const demoBanner = 'data:image/svg+xml;utf8,' + encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="600" height="200">' +
+  '<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">' +
+  '<stop offset="0" stop-color="#5865f2"/><stop offset="1" stop-color="#a970ff"/>' +
+  '</linearGradient></defs><rect width="600" height="200" fill="url(#g)"/></svg>'
+);
+
 const seed = [
+  {
+    event_type: 'profile_update',
+    user_id: VALEN,
+    username: 'Valen',
+    guild_id: null,
+    guild_name: null,
+    content: 'nombre: valen → valen.rp · avatar actualizado · banner actualizado',
+    metadata: {
+      source: 'user',
+      initial: false,
+      changes: {
+        username: { from: 'valen', to: 'valen.rp' },
+        avatar: { from: null, to: 'demo' },
+        banner: { from: null, to: 'demo' },
+      },
+      nick: null,
+      before: {
+        username: 'valen', global_name: 'Valen', display: 'Valen',
+        avatar_url: bot.avatarUrl(VALEN, null), banner_url: null, accent_color: null,
+      },
+      after: {
+        username: 'valen.rp', global_name: 'Valen', display: 'Valen',
+        avatar_url: 'https://cdn.discordapp.com/embed/avatars/2.png',
+        banner_url: demoBanner,
+        accent_color: null,
+      },
+    },
+    created_at: ago(4),
+  },
   {
     event_type: 'presence',
     user_id: VALEN,
@@ -258,7 +295,7 @@ db.insertEvents(seed).then(() => {
   const port = Number(process.env.PORT);
   startServer(port);
   console.log(`[demo] datos falsos cargados: ${seed.length} eventos, 3 objetivos`);
-  console.log(`[demo] http://localhost:${port}  ·  password: demo`);
+  console.log(`[demo] http://localhost:${port}  ·  admin / demo`);
 });
 
 /* Un evento nuevo cada 30s para ver el feed en vivo (SSE) funcionando. */

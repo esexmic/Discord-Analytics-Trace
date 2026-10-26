@@ -27,10 +27,6 @@ module.exports = {
   port: Number.parseInt(process.env.PORT || '3000', 10),
   trackAll: flag('TRACK_ALL'),
   seedTargets: list(process.env.TARGETS),
-  // Primer arranque remoto: por defecto el asistente solo acepta requests desde
-  // loopback, así un deploy público no queda con la puerta abierta esperando
-  // que el primero que pase invente la contraseña.
-  allowRemoteSetup: flag('ALLOW_REMOTE_SETUP'),
   nodeEnv: process.env.NODE_ENV || 'development',
   isProduction: process.env.NODE_ENV === 'production',
 };

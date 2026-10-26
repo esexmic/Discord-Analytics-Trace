@@ -1,0 +1,124 @@
+TRACE BY XYB — REGISTRO DE CAMBIOS DE APARIENCIA
+================================================
+
+Este archivo lleva el control de todo lo que se ve en el panel: marca, logo,
+colores, tipografía, pantallas, avatares y animaciones. La idea es que en el
+futuro estos valores se puedan editar desde una página web sin descargar nada;
+acá queda anotado dónde vive cada uno para exponerlos después.
+
+Ruta base: public/index.html (todo el CSS y el JS del panel están inline).
+Imagen de marca: public/logo.jpg (original en logo/logo.jpg).
+
+
+------------------------------------------------------------
+v1.2 — 26/10/2026
+------------------------------------------------------------
+
+MARCA
+- Nombre del producto: "Trace by XYB" (Trace primero, XYB segundo).
+- <title> del documento: "Trace by XYB".
+- Login: título "Trace by XYB".
+- Sidebar: nombre "Trace by XYB", subtítulo "activity monitor".
+- README: encabezado y descripción con el nombre nuevo.
+
+LOGO
+- public/logo.jpg copiado desde logo/logo.jpg (JPEG, 22 KB).
+- Favicon: <link rel="icon" href="/logo.jpg" type="image/jpeg">.
+- Login y primer arranque: reemplazaron el SVG por <img src="/logo.jpg">.
+- Sidebar: reemplazó el SVG por <img src="/logo.jpg">.
+- Los contenedores .login__mark y .brand__mark ahora recortan la imagen con
+  border-radius y object-fit: cover.
+
+AUTENTICACIÓN VISIBLE
+- Login con dos campos: usuario y contraseña (antes solo contraseña).
+- Primer arranque con tres campos: usuario, contraseña y repetir contraseña.
+- El botón de login dice "Entrar"; el del setup dice "Crear panel".
+- Ajustes → Cuenta: usuario, contraseña actual y contraseña nueva.
+- Ajustes → API keys: nombre, botón "Crear key", token visible una sola vez,
+  botón "Copiar", lista de keys con prefijo, creación, último uso y "Revocar".
+- El aviso de setup ya no habla de DASHBOARD_PASSWORD ni ALLOW_REMOTE_SETUP.
+
+AVATARES
+- Feed: avatar circular de 26 px (.ev__avatar) junto al nombre.
+- Sidebar: avatar circular de 26 px (.target__avatar) junto al objetivo.
+- Buscador de miembros: avatar circular de 24 px (.member__avatar).
+- Si el usuario no tiene avatar, se usa el default oficial de Discord
+  (cdn.discordapp.com/embed/avatars/N.png, N = (id >> 22) % 6).
+- Si la imagen falla, cae al default; si también falla, quedan las iniciales.
+- El nombre nunca queda vacío: iniciales de respaldo + avatar por defecto.
+
+COLORES (variables CSS en :root)
+- --bg: #07080c            fondo general
+- --bg-2: #0b0d13          fondo secundario
+- --panel: #101319         tarjetas y sidebar
+- --panel-2: #151922       botones fantasma y hover
+- --line: #222736          bordes suaves
+- --line-2: #2c3346        bordes de inputs
+- --text: #e8ebf3          texto principal
+- --muted: #8a93a8        texto secundario
+- --muted-2: #646d82      texto terciario
+- --accent: #5865f2       azul Discord (botones, foco, chips activos)
+- --accent-soft: #5865f226 halo de foco
+- --green: #3ba55d        en línea / estados OK
+- --red: #ed4245          errores
+- --amber: #faa61a        avisos de entorno
+- --cyan: #00b0f4         actividad de voz
+- --purple: #a970ff       stream / dispositivos
+- --radius: 14px          radio de tarjetas
+- --radius-sm: 9px        radio de inputs y botones
+
+TIPOGRAFÍA
+- Fuente base: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif.
+- Tamaño base: 14px, altura de línea 1.5.
+- Monospace: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas.
+- Títulos del login: 19px, tracking -0.2px.
+- Nombre de marca en sidebar: 13.5px, peso 700, tracking .04em.
+- Subtítulo de marca: 11px.
+
+ANIMACIONES Y MOVIMIENTO
+- --ease-out: cubic-bezier(0.23, 1, 0.32, 1)   entradas y respuestas
+- --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1) salidas
+- Botones: scale(0.97) al presionar, 120ms.
+- Cards de objetivo: scale(0.985) al presionar.
+- Chips: scale(0.97) al presionar.
+- Hover solo con puntero fino: @media (hover: hover) and (pointer: fine).
+- Respeta prefers-reduced-motion (ver bloque al final del CSS).
+- Los eventos nuevos entran con @keyframes slideIn.
+- El diálogo usa @starting-style para la entrada.
+
+PANTALLAS
+- Login: tarjeta centrada de 380px, fondo con degradado azul, logo 46px.
+- Primer arranque: misma tarjeta, copy propio y tres campos.
+- App: sidebar fija de 330px + main flexible.
+- Sidebar: marca, estado del bot, resumen 24h, objetivos y cerrar sesión.
+- Topbar: chips de tipo de evento, buscador, filtros y botón Ajustes.
+- Feed: tarjetas de evento con icono, autor, hora relativa y contenido.
+- Ajustes: diálogo ancho (680px) con secciones Discord, Supabase, Objetivo,
+  Alertas, Cuenta y API keys.
+- Buscador de miembros: diálogo con selector de servidor, búsqueda y lista.
+
+ESTADOS VISUALES
+- .pill.is-on (verde) = configurado / guardado.
+- .pill.is-off (rojo) = sin configurar / error.
+- .pill.is-env (ámbar) = definido por variable de entorno.
+- .cfg__msg.is-ok / .is-bad / .is-busy = mensajes de cada sección.
+- .dot--live / .dot--down = estado del bot.
+- Chip activo: fondo --accent y texto blanco.
+
+TEXTOS DE INTERFAZ
+- Todo el panel está en español rioplatense.
+- "Trace by XYB" reemplaza a "XYB · Trace" en título y cabeceras.
+- "Cuenta" reemplaza a "Contraseña del panel".
+- "Crear key", "Copiar", "Revocar", "Key creada", "Key revocada".
+- "Copiala ahora: no se vuelve a mostrar."
+
+PENDIENTE PARA LA PÁGINA WEB FUTURA
+- Exponer nombre de marca y subtítulo.
+- Exponer logo y favicon (subida de archivo).
+- Exponer los colores de :root y los radios.
+- Exponer tipografía y tamaños base.
+- Exponer textos del login y del primer arranque.
+- Exponer si se muestran avatares en feed/sidebar/buscador.
+- Exponer la curva de animación y si se respeta reduced-motion.
+- Guardar todo en data/settings.json o en una tabla de Supabase, con preview
+  en vivo antes de aplicar.

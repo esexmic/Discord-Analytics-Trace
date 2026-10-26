@@ -39,7 +39,7 @@ function getClient() {
   if (!client || clientKey !== signature) {
     client = createClient(url, key, {
       auth: { persistSession: false, autoRefreshToken: false },
-      global: { headers: { 'x-application-name': 'watchtower' } },
+      global: { headers: { 'x-application-name': 'xyb' } },
     });
     clientKey = signature;
   }

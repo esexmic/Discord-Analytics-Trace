@@ -16,12 +16,15 @@ const {
   getPresenceSnapshot,
   getPresenceDetails,
   getVoiceSnapshot,
+  getProfile,
+  rememberProfile,
+  avatarUrl,
   botStatus,
   displayName,
 } = require('./bot');
 
 const app = express();
-const COOKIE_NAME = 'wt_session';
+const COOKIE_NAME = 'xyb_session';
 const SESSION_MS = 7 * 24 * 60 * 60 * 1000;
 const EVENT_TYPES = [
   'message',
@@ -33,6 +36,7 @@ const EVENT_TYPES = [
   'voice_stream',
   'voice_camera',
   'presence',
+  'profile_update',
 ];
 
 app.set('trust proxy', 1);
@@ -102,9 +106,35 @@ function cookie(req, value, maxAgeSeconds) {
   return parts.join('; ');
 }
 
+/** Acepta `Authorization: Bearer xyb_…` o `x-api-key: xyb_…`. */
+function bearerToken(req) {
+  const header = String(req.headers.authorization || '');
+  if (/^bearer\s+/i.test(header)) return header.replace(/^bearer\s+/i, '').trim();
+  const key = req.headers['x-api-key'];
+  return typeof key === 'string' ? key.trim() : '';
+}
+
+function currentAuth(req) {
+  if (validToken(readCookie(req, COOKIE_NAME))) return { type: 'session' };
+  const token = bearerToken(req);
+  if (!token) return null;
+  const key = settings.verifyKey(token);
+  return key ? { type: 'key', key } : null;
+}
+
 function requireAuth(req, res, next) {
-  if (!validToken(readCookie(req, COOKIE_NAME))) {
-    return res.status(401).json({ error: 'Sesión requerida' });
+  const auth = currentAuth(req);
+  if (!auth) {
+    return res.status(401).json({ error: 'Sesión o API key requerida' });
+  }
+  req.auth = auth;
+  next();
+}
+
+/** Rutas sensibles: credenciales, keys y control del bot. Solo cookie. */
+function requireSession(req, res, next) {
+  if (req.auth?.type !== 'session') {
+    return res.status(403).json({ error: 'Esta ruta necesita sesión del panel, no API key' });
   }
   next();
 }
@@ -123,24 +153,20 @@ function rateLimited(ip) {
   return entry.count > 10;
 }
 
-function isLoopback(ip) {
-  const value = String(ip || '');
-  return value === '127.0.0.1' || value === '::1' || value === '::ffff:127.0.0.1';
-}
-
 app.post('/api/login', (req, res) => {
   const ip = req.ip || 'unknown';
   if (rateLimited(ip)) {
     return res.status(429).json({ error: 'Demasiados intentos, esperá un minuto' });
   }
 
+  const username = String(req.body?.username ?? '').trim();
   const password = String(req.body?.password ?? '');
-  if (!settings.verifyPassword(password)) {
-    return res.status(401).json({ error: 'Contraseña incorrecta' });
+  if (!settings.verifyAccount(username, password)) {
+    return res.status(401).json({ error: 'Usuario o contraseña incorrectos' });
   }
 
   res.setHeader('Set-Cookie', cookie(req, issueToken(), Math.floor(SESSION_MS / 1000)));
-  res.json({ ok: true });
+  res.json({ ok: true, username: settings.accountView().username });
 });
 
 app.post('/api/logout', (req, res) => {
@@ -149,9 +175,12 @@ app.post('/api/logout', (req, res) => {
 });
 
 app.get('/api/session', (req, res) => {
+  const auth = currentAuth(req);
   res.json({
-    authed: validToken(readCookie(req, COOKIE_NAME)),
-    needsSetup: !settings.hasPassword(),
+    authed: Boolean(auth),
+    authType: auth?.type ?? null,
+    username: auth ? settings.accountView().username : null,
+    needsSetup: !settings.hasAccount(),
     configured: settings.publicView().configured,
   });
 });
@@ -160,42 +189,65 @@ app.get('/api/session', (req, res) => {
 
 app.get('/api/setup', (req, res) => {
   const view = settings.publicView();
-  res.json({
-    needsSetup: !view.hasPassword,
-    remoteAllowed: config.allowRemoteSetup || isLoopback(req.ip),
-    configured: view.configured,
-  });
+  res.json({ needsSetup: !view.hasAccount, configured: view.configured });
 });
 
 /**
- * Primer arranque: crear la contraseña del panel. Solo se acepta mientras no
- * haya ninguna, y solo desde loopback salvo que ALLOW_REMOTE_SETUP=true.
+ * Primer arranque: crear usuario y contraseña. La ventana se cierra sola en
+ * cuanto existe una cuenta, así que el deploy público puede pasar por acá una
+ * única vez sin depender de variables de entorno.
  */
 app.post('/api/setup', (req, res) => {
-  if (settings.hasPassword()) {
-    return res.status(409).json({ error: 'El panel ya tiene contraseña' });
+  const ip = req.ip || 'unknown';
+  if (rateLimited(ip)) {
+    return res.status(429).json({ error: 'Demasiados intentos, esperá un minuto' });
   }
-  if (!config.allowRemoteSetup && !isLoopback(req.ip)) {
-    return res.status(403).json({
-      error: 'Por seguridad el primer setup solo se puede hacer desde localhost. Definí DASHBOARD_PASSWORD o ALLOW_REMOTE_SETUP=true.',
-    });
+  if (settings.hasAccount()) {
+    return res.status(409).json({ error: 'La cuenta ya existe' });
   }
 
   try {
-    settings.setPassword(req.body?.password);
+    const created = settings.createAccount(req.body?.username, req.body?.password);
     res.setHeader('Set-Cookie', cookie(req, issueToken(), Math.floor(SESSION_MS / 1000)));
-    res.json({ ok: true });
+    res.json({ ok: true, username: created.username });
   } catch (error) {
     sendError(res, error);
   }
 });
 
-app.post('/api/password', requireAuth, (req, res) => {
+app.post('/api/account', requireAuth, requireSession, (req, res) => {
   try {
-    if (settings.publicView().passwordSource === 'env') {
-      return res.status(409).json({ error: 'La contraseña viene de DASHBOARD_PASSWORD; cambiala ahí' });
+    if (settings.accountView().source === 'env') {
+      return res.status(409).json({ error: 'La cuenta viene de DASHBOARD_USERNAME / DASHBOARD_PASSWORD; cambiala en el deploy' });
     }
-    settings.changePassword(req.body?.current, req.body?.next);
+    const result = settings.changeAccount(req.body?.current, {
+      username: req.body?.username,
+      password: req.body?.password,
+    });
+    res.json({ ok: true, username: result.username });
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
+/* ---------------------------------------------------------------- keys ---- */
+
+app.get('/api/keys', requireAuth, requireSession, (req, res) => {
+  res.json({ keys: settings.listKeys() });
+});
+
+app.post('/api/keys', requireAuth, requireSession, (req, res) => {
+  try {
+    const created = settings.createKey(req.body?.name);
+    res.json({ ok: true, token: created.token, key: created.key });
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
+app.delete('/api/keys/:id', requireAuth, requireSession, (req, res) => {
+  try {
+    settings.revokeKey(req.params.id);
     res.json({ ok: true });
   } catch (error) {
     sendError(res, error);
@@ -240,13 +292,12 @@ function invalidateSummary() {
 
 /* ------------------------------------------------------------- settings --- */
 
-app.get('/api/settings', requireAuth, (req, res) => {
+app.get('/api/settings', requireAuth, requireSession, (req, res) => {
   const view = settings.publicView();
   res.json({
     ...view,
     trackAll: config.trackAll,
     seedTargets: config.seedTargets,
-    allowRemoteSetup: config.allowRemoteSetup,
     bot: botStatus(),
   });
 });
@@ -256,7 +307,7 @@ app.get('/api/settings', requireAuth, (req, res) => {
  * Supabase, reconstruye el cliente y recarga targets; si cambió el token,
  * reconecta el gateway.
  */
-app.put('/api/settings', requireAuth, async (req, res) => {
+app.put('/api/settings', requireAuth, requireSession, async (req, res) => {
   const before = settings.get();
   let after;
   try {
@@ -315,7 +366,7 @@ app.put('/api/settings', requireAuth, async (req, res) => {
  * Prueba credenciales sin guardarlas. Acepta valores en el body para poder
  * validar antes de escribir: { supabaseUrl, supabaseKey, discordToken }.
  */
-app.post('/api/settings/test', requireAuth, async (req, res) => {
+app.post('/api/settings/test', requireAuth, requireSession, async (req, res) => {
   const stored = settings.get();
   const results = {};
 
@@ -382,7 +433,7 @@ app.post('/api/settings/test', requireAuth, async (req, res) => {
   res.json({ ok: results.supabase.ok && results.discord.ok, results });
 });
 
-app.post('/api/bot/connect', requireAuth, async (req, res) => {
+app.post('/api/bot/connect', requireAuth, requireSession, async (req, res) => {
   try {
     const token = req.body?.token ? String(req.body.token).trim() : undefined;
     await startBot(token);
@@ -393,7 +444,7 @@ app.post('/api/bot/connect', requireAuth, async (req, res) => {
   }
 });
 
-app.post('/api/bot/disconnect', requireAuth, async (req, res) => {
+app.post('/api/bot/disconnect', requireAuth, requireSession, async (req, res) => {
   await stopBot();
   invalidateSummary();
   res.json({ ok: true, bot: botStatus() });
@@ -424,6 +475,7 @@ app.get('/api/summary', requireAuth, async (req, res) => {
         presence: {},
         activity: {},
         voice: {},
+        avatars: {},
         byType: Object.fromEntries(EVENT_TYPES.map((type) => [type, 0])),
         bot: botStatus(),
         queue: { pending: queue.size, dropped: queue.dropped },
@@ -462,10 +514,13 @@ app.get('/api/summary', requireAuth, async (req, res) => {
     const presence = {};
     const activity = {};
     const voice = {};
+    const avatars = {};
     for (const row of targetRows) {
       presence[row.user_id] = snapshot[row.user_id] ?? null;
       if (details[row.user_id]) activity[row.user_id] = details[row.user_id];
       if (voiceAll[row.user_id]) voice[row.user_id] = voiceAll[row.user_id];
+      const profile = getProfile(row.user_id);
+      avatars[row.user_id] = profile?.avatar_url || avatarUrl(row.user_id, null);
     }
 
     const payload = {
@@ -475,6 +530,7 @@ app.get('/api/summary', requireAuth, async (req, res) => {
       presence,
       activity,
       voice,
+      avatars,
       byType: counts,
       bot: botStatus(),
       queue: { pending: queue.size, dropped: queue.dropped },
@@ -551,7 +607,10 @@ app.post('/api/targets', requireAuth, async (req, res) => {
       const client = getClient();
       if (client?.isReady?.()) {
         const user = await client.users.fetch(userId).catch(() => null);
-        if (user) username = displayName(user);
+        if (user) {
+          username = displayName(user);
+          rememberProfile(user);
+        }
       }
     }
     if (!username && db.isConfigured()) {
@@ -632,6 +691,7 @@ app.get('/api/members', requireAuth, async (req, res) => {
         id: member.id,
         username: displayName(member.user),
         nickname: member.displayName || null,
+        avatar_url: avatarUrl(member.id, member.user?.avatar ?? null),
         bot: Boolean(member.user?.bot),
       })),
     });

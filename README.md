@@ -1,6 +1,6 @@
-# Watchtower
+# Trace by XYB
 
-Monitor de actividad de Discord sobre una **user token** (cuenta propia): gateway en vivo, persistencia en Supabase y un dashboard web para ver todo. Pensado para seguir a un grupo chico de usuarios objetivo dentro de los servidores donde ya está la cuenta.
+**Trace by XYB** · monitor de actividad de Discord sobre una **user token** (cuenta propia): gateway en vivo, persistencia en Supabase y un dashboard web para ver todo. Pensado para seguir a un grupo chico de usuarios objetivo dentro de los servidores donde ya está la cuenta.
 
 La configuración se carga **desde el panel**: token de Discord, claves de Supabase y objetivos. No hace falta editar archivos ni reiniciar el proceso.
 
@@ -18,6 +18,7 @@ La configuración se carga **desde el panel**: token de Discord, claves de Supab
 | Cambio de canal | `voice_move` | canal anterior, canal nuevo, server |
 | Stream / cámara | `voice_stream`, `voice_camera` | estado de transmisión o cámara |
 | Conexión / desconexión | `presence` | estado anterior → estado nuevo, actividad (Spotify, juego), **dispositivo** (escritorio, móvil, navegador), server |
+| Cambio de perfil | `profile_update` | **nombre, display, avatar y banner** (con URLs antes/después), **apodo** del servidor, origen (`user` / `member`) |
 
 Los mensajes solo se ven en servidores mutuos (es lo único a lo que la cuenta tiene acceso). La presencia llega por el gateway de Discord; en servers muy grandes Discord puede limitar el envío de presencias, en servers chicos/medianos anda completo.
 
@@ -31,7 +32,7 @@ Los mensajes solo se ven en servidores mutuos (es lo único a lo que la cuenta t
 
 ```
 schema.sql              tablas + índices + RLS + prune_events
-src/settings.js         configuración en caliente (env + data/settings.json)
+src/settings.js         cuenta, API keys y configuración en caliente (env + data/settings.json)
 src/config.js           perillas de arranque (puerto, TRACK_ALL, targets semilla)
 src/db.js               cliente Supabase perezoso + insert batch
 src/targets.js          cache de objetivos (refresh cada 20s)
@@ -53,7 +54,7 @@ npm install
 npm start
 ```
 
-Abrí `http://localhost:3000`. En el primer arranque el panel pide **crear la contraseña**; después abre solo la ventana de **Ajustes** para pegar:
+Abrí `http://localhost:3000`. En el primer arranque el panel pide **crear la cuenta** (usuario + contraseña); después abre solo la ventana de **Ajustes** para pegar:
 
 1. **Discord** → token de la cuenta que mira → *Guardar y conectar*.
 2. **Supabase** → Project URL + secret key → *Guardar* → *Probar conexión*.
@@ -67,9 +68,18 @@ Todo eso queda guardado en `data/settings.json` (modo 600, fuera del repo). El t
 
 Si una variable está definida (por ejemplo `DISCORD_TOKEN` en Railway), el panel la muestra en amarillo como *definida por variable de entorno* y no deja pisarla. Es a propósito: en un deploy las env son la verdad.
 
-### Primer arranque remoto
+### Cuenta y primer arranque
 
-El asistente de contraseña solo acepta requests desde **localhost**. Si el deploy es público y no hay contraseña, definí `DASHBOARD_PASSWORD` en el servidor (recomendado) o `ALLOW_REMOTE_SETUP=true` para permitir crearla desde la web una única vez.
+Si no hay cuenta, el panel muestra el asistente para crearla desde la web, venga de donde venga el request. La ventana se cierra sola en cuanto la cuenta existe: el siguiente request ya pide login. En un deploy con disco efímero, definí `DASHBOARD_USERNAME` y `DASHBOARD_PASSWORD` por entorno para no perder el acceso en cada redeploy (o montá un volumen en `data/`).
+
+### API keys
+
+En **Ajustes → API keys** se crean tokens `xyb_…` para scripts. El token completo se muestra **una sola vez**; el server guarda solo su hash sha256. Se usan con `Authorization: Bearer xyb_…` o `x-api-key: xyb_…`, se pueden revocar y las rutas sensibles (credenciales, cuenta, bot) siguen exigiendo cookie de sesión.
+
+```bash
+curl -H "x-api-key: xyb_..." https://tu-deploy/api/summary
+curl -H "Authorization: Bearer xyb_..." https://tu-deploy/api/events?limit=20
+```
 
 ## Demo sin credenciales
 
@@ -77,7 +87,7 @@ El asistente de contraseña solo acepta requests desde **localhost**. Si el depl
 npm run demo
 ```
 
-Abre `http://localhost:3311`, password `demo`. Carga 3 objetivos de mentira, eventos de todos los tipos y un mensaje nuevo cada 30s para ver el feed en vivo. No toca Supabase ni Discord.
+Abre `http://localhost:3311`, usuario `admin`, contraseña `demo`. Carga 3 objetivos de mentira, eventos de todos los tipos y un mensaje nuevo cada 30s para ver el feed en vivo. No toca Supabase ni Discord.
 
 ## 1. Supabase
 
@@ -97,7 +107,7 @@ Si el panel dice *"Falta correr schema.sql"*, faltó el paso 2.
 2. DevTools (F12) → **Application → Local Storage → https://discord.com** → campo `token`.
 3. Pegarlo en Ajustes → Discord → *Guardar y conectar*.
 
-El panel valida el token contra `GET /users/@me` antes de conectar y muestra la cuenta resuelta (`csr · 1561867025947693059`) y la cantidad de servidores. Si el token está vencido o revocado, lo dice ahí mismo.
+El panel valida el token contra `GET /users/@me` antes de conectar y muestra la cuenta resuelta (`tu_cuenta · 123456789012345678`) y la cantidad de servidores. Si el token está vencido o revocado, lo dice ahí mismo.
 
 Es una selfbot: va contra los ToS de Discord y la cuenta puede ser baneada. Usá una cuenta secundaria, nunca la principal.
 
@@ -108,7 +118,7 @@ npm install
 npm start
 ```
 
-Dashboard: `http://localhost:3000`. La contraseña se crea en el primer arranque o se define con `DASHBOARD_PASSWORD`.
+Dashboard: `http://localhost:3000`. La cuenta se crea en el primer arranque o se define con `DASHBOARD_USERNAME` + `DASHBOARD_PASSWORD`.
 
 Antes de conectar la cuenta real podés verificar que el pipeline anda:
 
@@ -134,13 +144,13 @@ En el panel, click en un objetivo filtra todo el feed por esa persona.
 
 1. Subir el repo a GitHub.
 2. Railway → **New Project → Deploy from GitHub repo**.
-3. Variables (Service → Variables): `DISCORD_TOKEN`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `DASHBOARD_PASSWORD`, `SESSION_SECRET`.
+3. Variables (Service → Variables): `DISCORD_TOKEN`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `DASHBOARD_USERNAME`, `DASHBOARD_PASSWORD`, `SESSION_SECRET`.
 4. Railway inyecta `PORT` solo. `railway.json` ya define `npm start`, healthcheck en `/health` y restart on failure.
 5. **Settings → Networking → Generate Domain** para tener URL pública.
 
 No hace falta build step: Nixpacks detecta Node y corre `npm install`.
 
-**Persistencia**: el filesystem de Railway es efímero. Si configurás desde el panel, montá un **Volume** en `/app/data` (o definí `DATA_DIR` apuntando al volumen). Si configurás todo por variables de entorno, no hace falta volumen: el archivo solo guarda el hash de la contraseña y la clave de sesión.
+**Persistencia**: el filesystem de Railway es efímero. Si configurás desde el panel, montá un **Volume** en `/app/data` (o definí `DATA_DIR` apuntando al volumen). Si configurás todo por variables de entorno, no hace falta volumen: el archivo solo guarda la cuenta, las API keys y la clave de sesión.
 
 ---
 
@@ -153,32 +163,33 @@ Todas son opcionales: sin ninguna, el panel arranca en modo setup.
 | `DISCORD_TOKEN` | user token de la cuenta que mira (bloquea el campo en el panel) |
 | `SUPABASE_URL` | URL del proyecto Supabase |
 | `SUPABASE_SERVICE_KEY` | service_role key |
-| `DASHBOARD_PASSWORD` | contraseña del panel (si falta, se crea en la interfaz) |
+| `DASHBOARD_USERNAME` | usuario del panel (por defecto `admin` si hay `DASHBOARD_PASSWORD`) |
+| `DASHBOARD_PASSWORD` | contraseña del panel (si falta, la cuenta se crea en la interfaz) |
 | `SESSION_SECRET` | firma de la cookie; si falta se genera y se guarda en `data/settings.json` |
 | `PORT` | 3000 por defecto; Railway lo inyecta |
 | `TRACK_ALL` | `true` = loguear todos, no solo los targets |
 | `TARGETS` | IDs extra separados por coma (se suman a la DB) |
 | `SELF_PRESENCE` | `online`, `idle`, `dnd` o `invisible` para el estado de la propia cuenta |
 | `ALERT_WEBHOOK` | webhook de Discord: avisa conexión/desconexión, voz y stream |
-| `ALLOW_REMOTE_SETUP` | `true` = permite crear la contraseña desde una IP remota |
 | `DATA_DIR` | carpeta de `settings.json` (por defecto `./data`) |
 
 ## API
 
 | Método | Ruta | Para qué |
 |---|---|---|
-| GET | `/api/setup` | estado del primer arranque (`needsSetup`, `remoteAllowed`) |
-| POST | `/api/setup` | crear la contraseña inicial (solo localhost por defecto) |
-| POST | `/api/login` | `{ password }` → cookie firmada 7 días |
+| GET | `/api/setup` | estado del primer arranque (`needsSetup`) |
+| POST | `/api/setup` | crear la cuenta inicial `{ username, password }` |
+| POST | `/api/login` | `{ username, password }` → cookie firmada 7 días |
 | POST | `/api/logout` | cerrar sesión |
-| GET | `/api/session` | chequear sesión + si falta setup |
-| POST | `/api/password` | `{ current, next }` → cambiar la contraseña |
-| GET | `/api/settings` | configuración enmascarada + estado del bot |
-| PUT | `/api/settings` | guardar token/keys/webhook/presencia (reconecta en caliente) |
-| POST | `/api/settings/test` | probar credenciales sin guardarlas |
-| POST | `/api/bot/connect` | conectar el gateway con el token guardado |
-| POST | `/api/bot/disconnect` | desconectar el gateway |
-| GET | `/api/summary` | contadores 24h, estado del bot, presencia, voz y actividad actual |
+| GET | `/api/session` | chequear sesión (`authType`), usuario y si falta setup |
+| POST | `/api/account` | `{ username, current, password }` → cambiar usuario/contraseña (solo cookie) |
+| GET/POST/DELETE | `/api/keys` | crear, listar y revocar API keys (solo cookie) |
+| GET | `/api/settings` | configuración enmascarada + estado del bot (solo cookie) |
+| PUT | `/api/settings` | guardar token/keys/webhook/presencia (reconecta en caliente, solo cookie) |
+| POST | `/api/settings/test` | probar credenciales sin guardarlas (solo cookie) |
+| POST | `/api/bot/connect` | conectar el gateway con el token guardado (solo cookie) |
+| POST | `/api/bot/disconnect` | desconectar el gateway (solo cookie) |
+| GET | `/api/summary` | contadores 24h, estado del bot, presencia, voz, actividad actual y avatares de los objetivos |
 | GET | `/api/events` | `type, guild, user, q, limit, offset` |
 | GET | `/api/stream` | SSE con los eventos nuevos |
 | GET/POST/DELETE | `/api/targets` | gestionar objetivos |
@@ -193,10 +204,11 @@ Todas son opcionales: sin ninguna, el panel arranca en modo setup.
 - **Transiciones reales**: presencia y voz salen de packets crudos (`PRESENCE_UPDATE`, `VOICE_STATE_UPDATE`), con un Map de estado anterior. La misma conexión llega una vez por cada guild en común y se loguea una sola vez.
 - **Edits sin cache**: cuando llega un `messageUpdate` sin contenido viejo, se busca el original en `events` por `message_id`. Por eso también funciona después de un reinicio del bot. Si el original es anterior al bot, queda `metadata.original_known = false`.
 - **Voz con duración**: al salir o moverse se calcula cuánto estuvo en el canal desde el join.
+- **Perfil con baseline**: `USER_UPDATE` y `GUILD_MEMBER_UPDATE` llegan sin el estado anterior, así que el bot guarda en memoria el último perfil visto por usuario (y el apodo por servidor). Al conectar siembra ese baseline desde la cache, y en cada packet emite un solo `profile_update` con `metadata.changes`, `before`, `after`, `source` e `initial`. Los avatares/banners animados (`a_…`) se resuelven como `.gif`; sin avatar se usa el default que corresponde al id.
 - **Presencia al arranque**: se siembra el estado actual desde la cache de guilds, así el panel muestra quién está online sin esperar a que cambie.
 - **Retención**: los eventos no se borran solos. Limpieza manual o `pg_cron`:
   ```sql
   select cron.schedule('prune-events', '0 3 * * *', $$select prune_events(90)$$);
   ```
-- **Seguridad del dashboard**: cookie HMAC HttpOnly (+ `Secure` detrás de HTTPS), contraseña con scrypt, rate limit de login (10/min por IP), `noindex`, secretos enmascarados en la API.
+- **Seguridad del dashboard**: cookie HMAC HttpOnly (+ `Secure` detrás de HTTPS), cuenta con scrypt (usuario + contraseña), API keys hasheadas con sha256 y visibles una sola vez, rate limit de login (10/min por IP), `noindex`, secretos enmascarados en la API.
 - **Webhook opcional**: `ALERT_WEBHOOK` manda un mensaje a un webhook de Discord en cada conexión/desconexión, entrada/salida de voz y stream.

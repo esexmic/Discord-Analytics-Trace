@@ -11,10 +11,11 @@
 const os = require('os');
 const path = require('path');
 
-process.env.DATA_DIR = path.join(os.tmpdir(), `watchtower-smoke-${process.pid}`);
+process.env.DATA_DIR = path.join(os.tmpdir(), `XYB-smoke-${process.pid}`);
 process.env.DISCORD_TOKEN = 'fake.token.value.fake.token.value.fake';
 process.env.SUPABASE_URL = 'https://fake.supabase.co';
 process.env.SUPABASE_SERVICE_KEY = 'fake-service-key';
+process.env.DASHBOARD_USERNAME = 'tester';
 process.env.DASHBOARD_PASSWORD = 'test-password';
 process.env.SESSION_SECRET = 'test-session-secret';
 process.env.TRACK_ALL = 'true';
@@ -178,6 +179,63 @@ test('voice: join, stream y leave con duración', async () => {
   assert.ok(leave.metadata.seconds >= 1, 'la duración se calcula con el join');
 });
 
+test('profile: nombre, avatar animado, banner y apodo', async () => {
+  bot.__setClient(fakeClient);
+  bot.__seed();
+
+  await bot.handleUserUpdate({
+    id: TARGET_ID,
+    username: 'target_renamed',
+    global_name: 'Target Nuevo',
+    discriminator: '0',
+    avatar: 'a_abcdef',
+    banner: 'banner_hash',
+  });
+
+  await queue.drain(2000);
+
+  const profile = store.get('events').filter((event) => event.event_type === 'profile_update').at(-1);
+  assert.ok(profile, 'tiene que existir el evento de perfil');
+  assert.strictEqual(profile.metadata.changes.username.to, 'target_renamed');
+  assert.strictEqual(profile.metadata.changes.global_name.to, 'Target Nuevo');
+  assert.ok(profile.metadata.after.avatar_url.includes('/avatars/'));
+  assert.ok(profile.metadata.after.avatar_url.includes('.gif'), 'el avatar animado usa gif');
+  assert.ok(profile.metadata.after.banner_url.includes('/banners/'));
+  assert.match(profile.content, /nombre: target → target_renamed/);
+
+  await bot.handleMemberUpdate({
+    guild_id: GUILD_ID,
+    user: {
+      id: TARGET_ID,
+      username: 'target_renamed',
+      global_name: 'Target Nuevo',
+      avatar: 'a_abcdef',
+      banner: 'banner_hash',
+    },
+    nick: 'apodo nuevo',
+  });
+
+  await queue.drain(2000);
+
+  const nick = store.get('events').filter((event) => event.event_type === 'profile_update').at(-1);
+  assert.strictEqual(nick.metadata.nick.to, 'apodo nuevo');
+  assert.strictEqual(nick.guild_id, GUILD_ID);
+
+  await bot.handleUserUpdate({
+    id: '444444444444444444',
+    username: 'nuevo',
+    global_name: null,
+    avatar: null,
+    banner: null,
+  });
+
+  await queue.drain(2000);
+
+  const initial = store.get('events').filter((event) => event.event_type === 'profile_update').at(-1);
+  assert.strictEqual(initial.metadata.initial, true, 'el primer avistamiento se marca como inicial');
+  assert.ok(initial.metadata.after.avatar_url.includes('/embed/avatars/'), 'sin avatar usa el default');
+});
+
 test('presence: desconexión', async () => {
   await bot.handlePresence({
     user: { id: TARGET_ID },
@@ -216,14 +274,14 @@ test('api: login, auth, summary, targets y eventos', async () => {
     const bad = await fetch(`${base}/api/login`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ password: 'incorrecta' }),
+      body: JSON.stringify({ username: 'tester', password: 'incorrecta' }),
     });
     assert.strictEqual(bad.status, 401);
 
     const login = await fetch(`${base}/api/login`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ password: 'test-password' }),
+      body: JSON.stringify({ username: 'tester', password: 'test-password' }),
     });
     assert.strictEqual(login.status, 200);
     const cookie = login.headers.get('set-cookie').split(';')[0];
@@ -272,7 +330,7 @@ test('api: ajustes enmascarados, setup y contraseña protegidos', async () => {
     const login = await fetch(`${base}/api/login`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ password: 'test-password' }),
+      body: JSON.stringify({ username: 'tester', password: 'test-password' }),
     });
     assert.strictEqual(login.status, 200);
     const cookie = login.headers.get('set-cookie').split(';')[0];
@@ -283,9 +341,9 @@ test('api: ajustes enmascarados, setup y contraseña protegidos', async () => {
     const setup = await fetch(`${base}/api/setup`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ password: 'otra-clave-123' }),
+      body: JSON.stringify({ username: 'otro', password: 'otra-clave-123' }),
     });
-    assert.strictEqual(setup.status, 409, 'no se puede reconfigurar la contraseña');
+    assert.strictEqual(setup.status, 409, 'no se puede reconfigurar la cuenta');
 
     const view = await (await fetch(`${base}/api/settings`, { headers: { cookie } })).json();
     assert.strictEqual(view.hasDiscordToken, true);
@@ -302,16 +360,75 @@ test('api: ajustes enmascarados, setup y contraseña protegidos', async () => {
     assert.strictEqual(locked.status, 400);
     assert.match((await locked.json()).error, /variable de entorno/);
 
-    const password = await fetch(`${base}/api/password`, {
+    const account = await fetch(`${base}/api/account`, {
       method: 'POST',
       headers: { cookie, 'content-type': 'application/json' },
-      body: JSON.stringify({ current: 'test-password', next: 'nueva-clave-123' }),
+      body: JSON.stringify({ username: 'tester2', current: 'test-password', password: 'nueva-clave-123' }),
     });
-    assert.strictEqual(password.status, 409, 'con DASHBOARD_PASSWORD no se cambia desde el panel');
+    assert.strictEqual(account.status, 409, 'con DASHBOARD_PASSWORD no se cambia desde el panel');
 
     const summary = await (await fetch(`${base}/api/summary`, { headers: { cookie } })).json();
     assert.strictEqual(summary.configured.supabase, true);
     assert.strictEqual(summary.configured.discord, true);
+  } finally {
+    server.close();
+  }
+});
+
+test('api: keys — crear, usar con bearer y revocar', async () => {
+  const server = startServer(0);
+  await once(server, 'listening');
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  try {
+    const login = await fetch(`${base}/api/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'tester', password: 'test-password' }),
+    });
+    assert.strictEqual(login.status, 200);
+    const cookie = login.headers.get('set-cookie').split(';')[0];
+
+    const created = await fetch(`${base}/api/keys`, {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'smoke' }),
+    });
+    assert.strictEqual(created.status, 200);
+    const body = await created.json();
+    assert.ok(body.token.startsWith('xyb_'), 'el token tiene el prefijo xyb_');
+    assert.strictEqual(body.key.name, 'smoke');
+
+    const viaHeader = await fetch(`${base}/api/summary`, { headers: { 'x-api-key': body.token } });
+    assert.strictEqual(viaHeader.status, 200, 'la key sirve para leer');
+
+    const viaBearer = await fetch(`${base}/api/events?limit=5`, {
+      headers: { authorization: `Bearer ${body.token}` },
+    });
+    assert.strictEqual(viaBearer.status, 200, 'también acepta Authorization: Bearer');
+
+    const sensitive = await fetch(`${base}/api/settings`, { headers: { 'x-api-key': body.token } });
+    assert.strictEqual(sensitive.status, 403, 'la key no entra a credenciales');
+
+    const botControl = await fetch(`${base}/api/bot/disconnect`, {
+      method: 'POST',
+      headers: { 'x-api-key': body.token },
+    });
+    assert.strictEqual(botControl.status, 403, 'la key no controla el bot');
+
+    const list = await (await fetch(`${base}/api/keys`, { headers: { cookie } })).json();
+    assert.strictEqual(list.keys.length, 1);
+    assert.ok(!JSON.stringify(list).includes(body.token), 'el token completo no se vuelve a mostrar');
+    assert.ok(list.keys[0].prefix.startsWith('xyb_'), 'la lista muestra solo el prefijo');
+
+    const revoked = await fetch(`${base}/api/keys/${encodeURIComponent(body.key.id)}`, {
+      method: 'DELETE',
+      headers: { cookie },
+    });
+    assert.strictEqual(revoked.status, 200);
+
+    const after = await fetch(`${base}/api/summary`, { headers: { 'x-api-key': body.token } });
+    assert.strictEqual(after.status, 401, 'la key revocada deja de servir');
   } finally {
     server.close();
   }

@@ -1,8 +1,8 @@
 {
-  "name": "watchtower",
-  "version": "1.1.0",
+  "name": "xyb",
+  "version": "1.2.0",
   "private": true,
-  "description": "Monitor de actividad de Discord via user token + Supabase + dashboard web",
+  "description": "Trace by XYB — monitor de actividad de Discord: user token, Supabase y dashboard web",
   "main": "src/index.js",
   "engines": {
     "node": "22.x"

@@ -30,6 +30,12 @@ const presenceDetails = new Map();
 // `${guildId}:${userId}` -> { channelId, channelName, since, stream, video }
 const voiceStates = new Map();
 
+// userId -> { username, globalName, avatar, banner } — baseline para detectar
+// cambios de perfil (USER_UPDATE no trae los valores anteriores).
+const profiles = new Map();
+// `${guildId}:${userId}` -> apodo actual
+const nicknames = new Map();
+
 // ids de mensajes ya encolados en esta corrida (evita duplicados al reanudar)
 const loggedMessages = new Set();
 
@@ -445,6 +451,244 @@ function getVoiceSnapshot() {
   return snapshot;
 }
 
+/* --------------------------------------------------------------- perfil --- */
+
+const CDN = 'https://cdn.discordapp.com';
+const DEFAULT_AVATAR_COUNT = 6;
+
+/**
+ * El gateway manda los cambios de perfil sin el estado anterior, así que el
+ * baseline vive en `profiles` / `nicknames`. Los dos handlers comparan contra
+ * ese baseline y emiten un solo `profile_update` por cambio real.
+ */
+
+function hashExtension(hash) {
+  return String(hash).startsWith('a_') ? 'gif' : 'webp';
+}
+
+/** Los usuarios sin avatar usan uno de los seis defaults, elegido por el id. */
+function defaultAvatar(userId) {
+  let index = 0;
+  try {
+    index = Number((BigInt(userId) >> 22n) % BigInt(DEFAULT_AVATAR_COUNT));
+  } catch {
+    index = 0;
+  }
+  return `${CDN}/embed/avatars/${index}.png`;
+}
+
+function avatarUrl(userId, hash, size = 128) {
+  if (!userId) return null;
+  if (!hash) return defaultAvatar(userId);
+  return `${CDN}/avatars/${userId}/${hash}.${hashExtension(hash)}?size=${size}`;
+}
+
+function bannerUrl(userId, hash, size = 600) {
+  if (!userId || !hash) return null;
+  return `${CDN}/banners/${userId}/${hash}.${hashExtension(hash)}?size=${size}`;
+}
+
+/** Normaliza user de packet (snake_case) y user del library (camelCase). */
+function snapshotUser(user) {
+  const id = user?.id;
+  if (!id) return null;
+  return {
+    username: user.username ?? null,
+    global_name: user.globalName ?? user.global_name ?? null,
+    discriminator: user.discriminator ?? null,
+    avatar: user.avatar ?? null,
+    banner: user.banner ?? null,
+    accent_color: user.accentColor ?? user.accent_color ?? null,
+  };
+}
+
+function profileView(userId, snapshot) {
+  if (!snapshot) return null;
+  return {
+    username: snapshot.username,
+    global_name: snapshot.global_name,
+    display: displayName({
+      id: userId,
+      username: snapshot.username,
+      globalName: snapshot.global_name,
+      discriminator: snapshot.discriminator,
+    }),
+    avatar_url: avatarUrl(userId, snapshot.avatar),
+    banner_url: bannerUrl(userId, snapshot.banner),
+    accent_color: snapshot.accent_color ?? null,
+  };
+}
+
+function diffProfiles(before, after) {
+  const changes = {};
+  if (before.username !== after.username) {
+    changes.username = { from: before.username, to: after.username };
+  }
+  if (before.global_name !== after.global_name) {
+    changes.global_name = { from: before.global_name, to: after.global_name };
+  }
+  if (before.avatar !== after.avatar) {
+    changes.avatar = { from: before.avatar, to: after.avatar };
+  }
+  if (before.banner !== after.banner) {
+    changes.banner = { from: before.banner, to: after.banner };
+  }
+  return Object.keys(changes).length ? changes : null;
+}
+
+function describeProfileChanges(changes, afterView, nick) {
+  const parts = [];
+  if (changes.username) {
+    parts.push(`nombre: ${changes.username.from ?? '—'} → ${changes.username.to ?? '—'}`);
+  }
+  if (changes.global_name) {
+    parts.push(`display: ${changes.global_name.from ?? '—'} → ${changes.global_name.to ?? '—'}`);
+  }
+  if (changes.avatar) parts.push(afterView.avatar_url ? 'avatar actualizado' : 'avatar quitado');
+  if (changes.banner) parts.push(afterView.banner_url ? 'banner actualizado' : 'banner quitado');
+  if (nick) parts.push(`apodo: ${nick.from ?? '—'} → ${nick.to ?? '—'}`);
+  return parts.join(' · ');
+}
+
+async function emitProfileEvent({ userId, before, after, changes, source, initial, guild, nick }) {
+  const afterView = profileView(userId, after);
+  const beforeView = before ? profileView(userId, before) : null;
+  const username = afterView?.display ?? 'desconocido';
+
+  const summary = initial
+    ? `perfil inicial: ${username}`
+    : describeProfileChanges(changes, afterView, nick);
+  if (!summary) return;
+
+  await targets.touch(userId, username);
+
+  push({
+    event_type: 'profile_update',
+    user_id: userId,
+    username,
+    guild_id: guild?.id ?? null,
+    guild_name: guild?.name ?? null,
+    content: summary.slice(0, 4000),
+    metadata: {
+      source,
+      initial: Boolean(initial),
+      changes,
+      nick: nick ?? null,
+      before: beforeView,
+      after: afterView,
+    },
+  });
+
+  if (!initial && (changes.username || changes.global_name)) {
+    void alert(`${username} cambió de nombre (${beforeView?.display ?? '—'} → ${username})`);
+  }
+}
+
+async function handleUserUpdate(raw) {
+  const userId = raw?.id;
+  if (!userId || userId === client.user?.id) return;
+
+  const after = snapshotUser(raw);
+  if (!after) return;
+
+  const before = profiles.get(userId) ?? null;
+  profiles.set(userId, after);
+
+  if (!(await targets.isTarget(userId))) return;
+  const changes = before ? diffProfiles(before, after) : null;
+  if (before && !changes) return;
+
+  await emitProfileEvent({
+    userId,
+    before,
+    after,
+    changes: changes ?? {},
+    source: 'user',
+    initial: !before,
+    guild: null,
+    nick: null,
+  });
+}
+
+async function handleMemberUpdate(raw) {
+  const guildId = raw?.guild_id;
+  const user = raw?.user;
+  const userId = user?.id;
+  if (!guildId || !userId || userId === client.user?.id) return;
+
+  const guild = client.guilds.cache.get(guildId) ?? null;
+  const key = `${guildId}:${userId}`;
+
+  const nickKnown = nicknames.has(key);
+  const previousNick = nicknames.get(key) ?? null;
+  const nextNick = raw.nick ?? null;
+  nicknames.set(key, nextNick);
+
+  const embedded = user.username ? snapshotUser(user) : null;
+  const before = profiles.get(userId) ?? null;
+  const after = embedded ?? before;
+  if (embedded) profiles.set(userId, embedded);
+  if (!after) return;
+
+  if (!(await targets.isTarget(userId))) return;
+
+  const changes = before ? diffProfiles(before, after) : null;
+  const nickChange = nickKnown && previousNick !== nextNick
+    ? { from: previousNick, to: nextNick }
+    : null;
+  if (!changes && !nickChange) return;
+
+  await emitProfileEvent({
+    userId,
+    before,
+    after,
+    changes: changes ?? {},
+    source: 'member',
+    initial: !before,
+    guild,
+    nick: nickChange,
+  });
+}
+
+function seedProfiles() {
+  for (const user of client.users.cache.values()) {
+    const snapshot = snapshotUser(user);
+    if (snapshot) profiles.set(user.id, snapshot);
+  }
+  for (const guild of client.guilds.cache.values()) {
+    for (const member of guild.members?.cache?.values() ?? []) {
+      const userId = member.id ?? member.user?.id;
+      if (!userId) continue;
+      if (member.user) {
+        const snapshot = snapshotUser(member.user);
+        if (snapshot) profiles.set(userId, snapshot);
+      }
+      nicknames.set(`${guild.id}:${userId}`, member.nick ?? null);
+    }
+  }
+}
+
+/** Perfil actual de un usuario, para el sidebar y los thumbs del feed. */
+function getProfile(userId) {
+  let snapshot = profiles.get(userId) ?? null;
+  if (!snapshot) {
+    const user = client?.users?.cache?.get(userId);
+    if (user) {
+      snapshot = snapshotUser(user);
+      if (snapshot) profiles.set(userId, snapshot);
+    }
+  }
+  return snapshot ? profileView(userId, snapshot) : null;
+}
+
+/** Siembra el baseline cuando se agrega un objetivo con el bot conectado. */
+function rememberProfile(user) {
+  const snapshot = snapshotUser(user);
+  if (!snapshot) return null;
+  profiles.set(user.id, snapshot);
+  return profileView(user.id, snapshot);
+}
+
 /* ------------------------------------------------------------- mensajes --- */
 
 function trackLogged(messageId) {
@@ -576,6 +820,7 @@ async function onReady() {
 
   seedPresence();
   seedVoice();
+  seedProfiles();
 
   const { selfPresence } = settings.get();
   if (selfPresence) {
@@ -605,6 +850,8 @@ async function onRawPacket(packet) {
   if (!packet || typeof packet !== 'object') return;
   if (packet.t === 'PRESENCE_UPDATE') return handlePresence(packet.d);
   if (packet.t === 'VOICE_STATE_UPDATE') return handleVoice(packet.d);
+  if (packet.t === 'USER_UPDATE') return handleUserUpdate(packet.d);
+  if (packet.t === 'GUILD_MEMBER_UPDATE') return handleMemberUpdate(packet.d);
 }
 
 function wire(instance) {
@@ -680,6 +927,8 @@ async function stopBot() {
   presenceCache.clear();
   presenceDetails.clear();
   voiceStates.clear();
+  profiles.clear();
+  nicknames.clear();
   messageCache.clear();
   loggedMessages.clear();
   return true;
@@ -715,6 +964,10 @@ module.exports = {
   getPresenceSnapshot,
   getPresenceDetails,
   getVoiceSnapshot,
+  getProfile,
+  rememberProfile,
+  avatarUrl,
+  bannerUrl,
   botStatus,
   displayName,
   // exportados para el smoke test
@@ -724,9 +977,12 @@ module.exports = {
   __seed: () => {
     seedPresence();
     seedVoice();
+    seedProfiles();
   },
   handlePresence,
   handleVoice,
+  handleUserUpdate,
+  handleMemberUpdate,
   handleMessage,
   handleMessageUpdate,
   handleMessageDelete,

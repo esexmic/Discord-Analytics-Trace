@@ -2,7 +2,7 @@
 
 /**
  * Cliente Supabase falso, solo para los tests. Implementa el subconjunto de la
- * API de consulta que usa Watchtower sobre un store en memoria.
+ * API de consulta que usa XYB sobre un store en memoria.
  */
 
 function clone(value) {

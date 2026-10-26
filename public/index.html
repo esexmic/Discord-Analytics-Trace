@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Watchtower</title>
+<title>Trace by XYB</title>
+<link rel="icon" href="/logo.jpg" type="image/jpeg">
 <style>
   :root {
     --bg: #07080c;
@@ -25,6 +26,9 @@
     --radius: 14px;
     --radius-sm: 9px;
     --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    /* Emil: una sola curva para todo lo que entra o responde. */
+    --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+    --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
   }
 
   * { box-sizing: border-box; }
@@ -62,19 +66,20 @@
     box-shadow: 0 30px 80px #00000080;
   }
   .login__mark {
-    width: 46px; height: 46px; border-radius: 13px;
+    width: 46px; height: 46px; border-radius: 13px; overflow: hidden;
     background: linear-gradient(140deg, var(--accent), #8b5cf6);
     display: grid; place-items: center; margin-bottom: 18px;
     box-shadow: 0 8px 24px #5865f24d;
   }
-  .login__mark svg { width: 24px; height: 24px; }
+  .login__mark img { width: 100%; height: 100%; object-fit: cover; display: block; }
   .login h1 { font-size: 19px; margin: 0 0 4px; letter-spacing: -0.2px; }
   .login p { margin: 0 0 22px; color: var(--muted); font-size: 13px; }
   .field {
     display: block; width: 100%;
     background: #0a0c11; border: 1px solid var(--line-2);
     border-radius: var(--radius-sm); padding: 11px 13px;
-    outline: none; transition: border-color .15s, box-shadow .15s;
+    outline: none;
+    transition: border-color .16s var(--ease-out), box-shadow .16s var(--ease-out);
   }
   .field:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
   .btn {
@@ -82,16 +87,18 @@
     background: var(--accent); color: #fff; border: 0;
     border-radius: var(--radius-sm); padding: 10px 16px;
     font-weight: 600; letter-spacing: .1px;
-    transition: filter .15s, transform .05s;
+    transition:
+      background-color .16s var(--ease-out),
+      border-color .16s var(--ease-out),
+      filter .16s var(--ease-out),
+      transform .12s var(--ease-out);
   }
-  .btn:hover { filter: brightness(1.08); }
-  .btn:active { transform: translateY(1px); }
+  .btn:active { transform: scale(0.97); }
+  .btn:disabled { opacity: .55; pointer-events: none; }
   .btn--block { width: 100%; margin-top: 12px; padding: 12px; }
   .btn--ghost { background: var(--panel-2); color: var(--text); border: 1px solid var(--line-2); font-weight: 500; }
-  .btn--ghost:hover { background: #1b2030; }
   .btn--mini { padding: 6px 10px; font-size: 12px; font-weight: 500; }
   .btn--danger { background: #2a1416; color: #ff8e90; border: 1px solid #4d2023; }
-  .btn--danger:hover { background: #36181b; }
   .error { color: #ff8e90; font-size: 12.5px; min-height: 18px; margin-top: 10px; }
 
   /* ---------------------------------------------------------------- layout */
@@ -105,11 +112,11 @@
   }
   .brand { display: flex; align-items: center; gap: 11px; }
   .brand__mark {
-    width: 36px; height: 36px; border-radius: 10px;
+    width: 36px; height: 36px; border-radius: 10px; overflow: hidden;
     background: linear-gradient(140deg, var(--accent), #8b5cf6);
     display: grid; place-items: center; box-shadow: 0 6px 18px #5865f240;
   }
-  .brand__mark svg { width: 19px; height: 19px; }
+  .brand__mark img { width: 100%; height: 100%; object-fit: cover; display: block; }
   .brand__name { font-weight: 700; letter-spacing: .04em; font-size: 13.5px; }
   .brand__sub { color: var(--muted-2); font-size: 11px; margin-top: 1px; }
 
@@ -154,9 +161,10 @@
     display: flex; align-items: center; gap: 9px;
     background: var(--panel); border: 1px solid var(--line);
     border-radius: 9px; padding: 8px 9px;
-    cursor: pointer; transition: border-color .13s, background .13s;
+    cursor: pointer;
+    transition: border-color .16s var(--ease-out), background-color .16s var(--ease-out), transform .12s var(--ease-out);
   }
-  .target:hover { border-color: var(--line-2); }
+  .target:active { transform: scale(0.985); }
   .target.is-active {
     border-color: var(--accent);
     background: #161b29;
@@ -169,10 +177,11 @@
   .target__activity .voice { color: #5ad0ff; }
   .target__activity .device { color: #a970ff; }
   .target__avatar {
-    width: 26px; height: 26px; border-radius: 50%; flex: none;
+    position: relative; width: 26px; height: 26px; border-radius: 50%; flex: none; overflow: hidden;
     background: linear-gradient(140deg, #2b3247, #1a1f2c);
     display: grid; place-items: center; font-size: 10px; font-weight: 700; color: #aab3c9;
   }
+  .target__avatar img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
   .target__main { min-width: 0; flex: 1; }
   .target__name { font-size: 12.5px; font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .target__meta { font-size: 10.5px; color: var(--muted-2); font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -182,7 +191,7 @@
     background: none; border: 0; color: var(--muted-2); font-size: 15px; line-height: 1;
     padding: 3px 5px; border-radius: 6px;
   }
-  .target__remove:hover { color: #ff8e90; background: #2a1416; }
+
 
   /* ------------------------------------------------------------------ main */
   .main { min-width: 0; display: flex; flex-direction: column; }
@@ -198,9 +207,9 @@
   .chip {
     background: transparent; border: 1px solid var(--line-2); color: var(--muted);
     border-radius: 999px; padding: 6px 12px; font-size: 12px; font-weight: 500;
-    transition: all .13s;
+    transition: border-color .16s var(--ease-out), color .16s var(--ease-out), background-color .16s var(--ease-out), transform .12s var(--ease-out);
   }
-  .chip:hover { border-color: #3b4460; color: var(--text); }
+  .chip:active { transform: scale(0.97); }
   .chip.is-on { background: var(--accent); border-color: var(--accent); color: #fff; }
 
   .search { position: relative; margin-left: auto; min-width: 200px; flex: 1; max-width: 340px; }
@@ -232,7 +241,7 @@
     background: none; border: 0; color: #aab3d6; font-size: 14px;
     line-height: 1; padding: 2px 5px; border-radius: 5px;
   }
-  .user-filter button:hover { background: #5865f233; color: #fff; }
+
 
   .feed { padding: 18px 22px 60px; display: flex; flex-direction: column; gap: 8px; }
 
@@ -241,11 +250,12 @@
     background: linear-gradient(180deg, #11141b, #0e1117);
     border: 1px solid var(--line); border-radius: var(--radius);
     padding: 12px 14px 12px 12px;
-    transition: border-color .15s, transform .15s;
-    animation: slideIn .18s ease-out;
+    transition: border-color .16s var(--ease-out);
   }
-  @keyframes slideIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
-  .ev:hover { border-color: var(--line-2); }
+  /* Solo las cards que llegan por SSE animan: un re-render no re-anima todo. */
+  .ev.is-new { animation: slideIn .22s var(--ease-out); }
+  @keyframes slideIn { from { opacity: 0; transform: translateY(-5px); } to { opacity: 1; transform: none; } }
+
   .ev__icon {
     width: 30px; height: 30px; border-radius: 9px;
     display: grid; place-items: center; font-size: 13px; font-weight: 700;
@@ -256,8 +266,16 @@
   .ev--delete .ev__icon { background: #ed42451a; color: #ff8e90; border-color: #ed424530; }
   .ev--voice .ev__icon { background: #00b0f41a; color: #5ad0ff; border-color: #00b0f430; }
   .ev--presence .ev__icon { background: #3ba55d1a; color: #6ddc91; border-color: #3ba55d30; }
+  .ev--profile .ev__icon { background: #a970ff1a; color: #c9a6ff; border-color: #a970ff30; }
 
-  .ev__head { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; }
+  .ev__head { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+  .ev__avatar {
+    position: relative; width: 18px; height: 18px; border-radius: 50%; overflow: hidden;
+    background: linear-gradient(140deg, #2b3247, #1a1f2c);
+    display: inline-grid; place-items: center; flex: none;
+    font-size: 8px; font-weight: 700; color: #aab3c9; letter-spacing: .02em;
+  }
+  .ev__avatar img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
   .ev__user { font-weight: 600; font-size: 13px; }
   .ev__verb { color: var(--muted); font-size: 12.5px; }
   .ev__time { margin-left: auto; color: var(--muted-2); font-size: 11px; white-space: nowrap; }
@@ -299,6 +317,32 @@
   .status-pill--dnd { color: #ff8e90; border-color: #ed424555; background: #ed424512; }
   .arrow { color: var(--muted-2); font-size: 11px; }
 
+  /* --------------------------------------------------------------- perfil -- */
+  .pf { display: flex; flex-direction: column; gap: 6px; margin-top: 9px; }
+  .pf__row {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    background: #0a0c11; border: 1px solid var(--line); border-radius: 8px;
+    padding: 7px 10px; font-size: 12.5px; min-height: 38px;
+  }
+  .pf__label {
+    font-size: 9.5px; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--muted-2); font-weight: 600; min-width: 54px;
+  }
+  .pf__old { color: #9aa0b0; text-decoration: line-through; text-decoration-color: #ed424566; }
+  .pf__new { color: #e2e7f3; font-weight: 550; }
+  .pf__avatar {
+    width: 30px; height: 30px; border-radius: 50%; object-fit: cover;
+    background: #1a1f2c; border: 1px solid var(--line-2);
+  }
+  .pf__banner {
+    height: 36px; max-width: 150px; border-radius: 6px; object-fit: cover;
+    background: #1a1f2c; border: 1px solid var(--line-2);
+  }
+  .pf__none {
+    font-size: 11px; color: var(--muted-2); border: 1px dashed var(--line-2);
+    border-radius: 6px; padding: 4px 9px;
+  }
+
   .empty {
     text-align: center; color: var(--muted-2); padding: 70px 20px;
     border: 1px dashed var(--line); border-radius: var(--radius);
@@ -312,18 +356,42 @@
     border: 1px solid var(--line-2); background: linear-gradient(180deg, #12151d, #0d1016);
     color: var(--text); border-radius: 16px; padding: 0; width: min(520px, 92vw);
     box-shadow: 0 40px 100px #000000aa;
+    opacity: 0; transform: translateY(6px) scale(0.985);
+    transition:
+      opacity .18s var(--ease-out),
+      transform .18s var(--ease-out),
+      overlay .18s allow-discrete,
+      display .18s allow-discrete;
   }
-  dialog::backdrop { background: #000000b3; backdrop-filter: blur(3px); }
+  dialog[open] { opacity: 1; transform: none; }
+  @starting-style {
+    dialog[open] { opacity: 0; transform: translateY(6px) scale(0.985); }
+  }
+  dialog::backdrop {
+    background: #000000b3; backdrop-filter: blur(3px);
+    opacity: 0;
+    transition: opacity .18s var(--ease-out), overlay .18s allow-discrete, display .18s allow-discrete;
+  }
+  dialog[open]::backdrop { opacity: 1; }
+  @starting-style {
+    dialog[open]::backdrop { opacity: 0; }
+  }
   .modal__head { padding: 18px 20px 12px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; }
   .modal__title { font-size: 15px; font-weight: 650; }
   .modal__body { padding: 16px 20px 20px; display: flex; flex-direction: column; gap: 10px; }
   .modal__close { background: none; border: 0; color: var(--muted-2); font-size: 18px; line-height: 1; padding: 4px 8px; border-radius: 6px; }
-  .modal__close:hover { color: var(--text); background: var(--panel-2); }
+
   .members { display: flex; flex-direction: column; gap: 5px; max-height: 300px; overflow-y: auto; }
   .member {
     display: flex; align-items: center; gap: 10px;
     border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 7px 9px;
   }
+  .member__avatar {
+    position: relative; width: 24px; height: 24px; border-radius: 50%; flex: none; overflow: hidden;
+    background: linear-gradient(140deg, #2b3247, #1a1f2c);
+    display: grid; place-items: center; font-size: 9px; font-weight: 700; color: #aab3c9;
+  }
+  .member__avatar img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
   .member__name { font-size: 12.5px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .member__id { font-size: 10px; color: var(--muted-2); font-family: var(--mono); }
   .member button { flex: none; }
@@ -363,6 +431,43 @@
   .pill.is-env { color: #ffc453; border-color: #faa61a55; background: #faa61a12; }
   .field-note { font-size: 10.5px; color: var(--muted-2); margin-top: -4px; }
 
+  /* ------------------------------------------------------------- api keys */
+  .key {
+    display: flex; align-items: center; gap: 10px;
+    border: 1px solid var(--line); background: #0a0d13; border-radius: 9px; padding: 8px 10px;
+  }
+  .key__main { flex: 1; min-width: 0; }
+  .key__name { font-size: 12px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .key__meta { font-size: 10.5px; color: var(--muted-2); font-family: var(--mono); }
+  .key__token {
+    display: flex; gap: 6px; align-items: center;
+    border: 1px solid #3ba55d55; background: #3ba55d10; border-radius: 9px; padding: 8px 10px;
+    font-family: var(--mono); font-size: 11px; word-break: break-all;
+  }
+  .key__token code { flex: 1; min-width: 0; color: #a9f0c1; }
+
+  /* Hover solo donde hay puntero real: en touch se queda pegado y se ve sucio. */
+  @media (hover: hover) and (pointer: fine) {
+    .btn:hover { filter: brightness(1.08); }
+    .btn--ghost:hover { background: #1b2030; }
+    .btn--danger:hover { background: #36181b; }
+    .target:hover { border-color: var(--line-2); }
+    .target__remove:hover { color: #ff8e90; background: #2a1416; }
+    .chip:hover { border-color: #3b4460; color: var(--text); }
+    .user-filter button:hover { background: #5865f233; color: #fff; }
+    .ev:hover { border-color: var(--line-2); }
+    .modal__close:hover { color: var(--text); background: var(--panel-2); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: .01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: .01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+
   @media (max-width: 920px) {
     .app { grid-template-columns: 1fr; }
     .sidebar { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
@@ -377,15 +482,12 @@
 <div id="login" class="login hidden">
   <form id="login-form" class="login__card" autocomplete="off">
     <div class="login__mark">
-      <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-        <circle cx="12" cy="12" r="3"></circle>
-        <path d="M12 3a9 9 0 0 0 0 18"></path>
-        <path d="M12 3a9 9 0 0 1 0 18"></path>
-      </svg>
+      <img src="/logo.jpg" alt="Trace by XYB" width="46" height="46">
     </div>
-    <h1>Watchtower</h1>
-    <p>Panel de actividad. Ingresá la contraseña del dashboard.</p>
-    <input id="login-password" class="field" type="password" placeholder="contraseña" autocomplete="current-password" />
+    <h1>Trace by XYB</h1>
+    <p>Panel de actividad. Entrá con tu usuario y contraseña.</p>
+    <input id="login-username" class="field" type="text" placeholder="usuario" autocomplete="username" autocapitalize="none" spellcheck="false" />
+    <input id="login-password" class="field" type="password" placeholder="contraseña" autocomplete="current-password" style="margin-top:8px" />
     <button class="btn btn--block" type="submit">Entrar</button>
     <div id="login-error" class="error"></div>
   </form>
@@ -395,16 +497,13 @@
 <div id="setup" class="login hidden">
   <form id="setup-form" class="login__card" autocomplete="off">
     <div class="login__mark">
-      <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-        <circle cx="12" cy="12" r="3"></circle>
-        <path d="M12 3a9 9 0 0 0 0 18"></path>
-        <path d="M12 3a9 9 0 0 1 0 18"></path>
-      </svg>
+      <img src="/logo.jpg" alt="Trace by XYB" width="46" height="46">
     </div>
     <h1>Primer arranque</h1>
-    <p id="setup-copy">Creá la contraseña del panel. Después pegás el token de Discord y las claves de Supabase desde Ajustes.</p>
+    <p id="setup-copy">Creá la cuenta del panel. Después pegás el token de Discord y las claves de Supabase desde Ajustes.</p>
     <div id="setup-fields">
-      <input id="setup-password" class="field" type="password" placeholder="contraseña (8+ caracteres)" autocomplete="new-password" />
+      <input id="setup-username" class="field" type="text" placeholder="usuario (3-32, letras/números)" autocomplete="username" autocapitalize="none" spellcheck="false" />
+      <input id="setup-password" class="field" type="password" placeholder="contraseña (8+ caracteres)" autocomplete="new-password" style="margin-top:8px" />
       <input id="setup-repeat" class="field" type="password" placeholder="repetir contraseña" autocomplete="new-password" style="margin-top:8px" />
       <button class="btn btn--block" type="submit">Crear panel</button>
     </div>
@@ -417,14 +516,10 @@
   <aside class="sidebar">
     <div class="brand">
       <div class="brand__mark">
-        <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="12" cy="12" r="3"></circle>
-          <path d="M12 3a9 9 0 0 0 0 18"></path>
-          <path d="M12 3a9 9 0 0 1 0 18"></path>
-        </svg>
+        <img src="/logo.jpg" alt="" width="36" height="36">
       </div>
       <div>
-        <div class="brand__name">WATCHTOWER</div>
+        <div class="brand__name">Trace by XYB</div>
         <div class="brand__sub">activity monitor</div>
       </div>
     </div>
@@ -470,7 +565,7 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
           <circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path>
         </svg>
-        <input id="search" class="field" type="text" placeholder="Buscar texto o usuario..." />
+        <input id="search" class="field" type="text" placeholder="Buscar texto o usuario…  ( / )" />
       </div>
     </div>
 
@@ -584,17 +679,36 @@
 
     <section class="cfg">
       <div class="cfg__head">
-        <span class="cfg__title">Contraseña del panel</span>
+        <span class="cfg__title">Cuenta</span>
         <span id="cfg-pass-source" class="pill">—</span>
       </div>
+      <p class="hint">Usuario y contraseña del panel. Si la cuenta viene de <code>DASHBOARD_USERNAME</code> / <code>DASHBOARD_PASSWORD</code>, se cambia en el deploy.</p>
       <div class="cfg__row">
-        <input id="cfg-pass-current" class="small-input" type="password" placeholder="actual" autocomplete="current-password" />
-        <input id="cfg-pass-next" class="small-input" type="password" placeholder="nueva (8+)" autocomplete="new-password" />
+        <input id="cfg-account-username" class="small-input" type="text" placeholder="usuario" autocomplete="username" autocapitalize="none" spellcheck="false" />
       </div>
       <div class="cfg__row">
-        <button id="cfg-pass-save" class="btn btn--mini" type="button">Cambiar contraseña</button>
+        <input id="cfg-pass-current" class="small-input" type="password" placeholder="contraseña actual" autocomplete="current-password" />
+        <input id="cfg-pass-next" class="small-input" type="password" placeholder="nueva (vacío = no cambiarla)" autocomplete="new-password" />
+      </div>
+      <div class="cfg__row">
+        <button id="cfg-pass-save" class="btn btn--mini" type="button">Guardar cuenta</button>
       </div>
       <div id="cfg-pass-msg" class="cfg__msg"></div>
+    </section>
+
+    <section class="cfg">
+      <div class="cfg__head">
+        <span class="cfg__title">API keys</span>
+        <span id="cfg-keys-count" class="pill">0</span>
+      </div>
+      <p class="hint">Para scripts y automatizaciones: <code>Authorization: Bearer xyb_…</code> o <code>x-api-key</code>. Las keys leen datos y administran objetivos, pero no pueden tocar credenciales, la cuenta ni el bot.</p>
+      <div class="cfg__row">
+        <input id="cfg-key-name" class="small-input" type="text" placeholder="nombre (ej: script alertas)" maxlength="60" autocomplete="off" />
+        <button id="cfg-key-create" class="btn btn--mini" type="button">Crear key</button>
+      </div>
+      <div id="cfg-key-new"></div>
+      <div id="cfg-keys-list" class="members" style="max-height:220px"></div>
+      <div id="cfg-keys-msg" class="cfg__msg"></div>
     </section>
 
     <div id="cfg-meta" class="hint"></div>
@@ -617,6 +731,7 @@
     voice_stream:   { label: 'Stream',    icon: '◉', cls: 'voice',    verb: 'cambió su stream' },
     voice_camera:   { label: 'Cámara',    icon: '▣', cls: 'voice',    verb: 'cambió su cámara' },
     presence:       { label: 'Conexión',  icon: '●', cls: 'presence', verb: 'cambió de estado' },
+    profile_update: { label: 'Perfil',    icon: '◑', cls: 'profile',  verb: 'cambió su perfil' },
   };
 
   const STATUS = {
@@ -634,6 +749,7 @@
     { value: 'message_delete', label: 'Borrados' },
     { value: 'voice', label: 'Voz' },
     { value: 'presence', label: 'Conexión' },
+    { value: 'profile_update', label: 'Perfil' },
   ];
 
   const state = {
@@ -651,6 +767,7 @@
     presence: {},
     details: {},
     voice: {},
+    avatars: {},
     summary: null,
     source: null,
   };
@@ -733,7 +850,78 @@
     return true;
   }
 
-  function card(event) {
+  const CDN = 'https://cdn.discordapp.com';
+
+  function defaultAvatar(userId) {
+    let index = 0;
+    try { index = Number((BigInt(userId) >> 22n) % 6n); } catch { index = 0; }
+    return `${CDN}/embed/avatars/${index}.png`;
+  }
+
+  function avatarFor(userId) {
+    return state.avatars?.[userId] || state.summary?.avatars?.[userId] || (userId ? defaultAvatar(userId) : '');
+  }
+
+  function avatarInner(url, name, userId) {
+    const label = `<span>${esc(initials(name))}</span>`;
+    const src = url || avatarFor(userId);
+    if (!src) return label;
+    const fallback = userId ? defaultAvatar(userId) : '';
+    const onerror = fallback && fallback !== src
+      ? `this.onerror=null;this.src='${esc(fallback)}'`
+      : 'this.remove()';
+    return `${label}<img src="${esc(src)}" alt="" loading="lazy" onerror="${onerror}">`;
+  }
+
+  function profileBody(event) {
+    const meta = event.metadata || {};
+    const before = meta.before || null;
+    const after = meta.after || null;
+    const changes = meta.changes || {};
+    const rows = [];
+
+    if (meta.initial) {
+      rows.push(`
+        <div class="pf__row">
+          <span class="pf__label">detectado</span>
+          ${after?.avatar_url ? `<img class="pf__avatar" src="${esc(after.avatar_url)}" alt="" loading="lazy">` : ''}
+          <span class="pf__new">${esc(after?.display || event.username)}</span>
+          ${after?.banner_url ? `<img class="pf__banner" src="${esc(after.banner_url)}" alt="" loading="lazy">` : ''}
+        </div>`);
+      return `<div class="pf">${rows.join('')}</div>`;
+    }
+
+    const nameRow = (label, change) => `
+      <div class="pf__row">
+        <span class="pf__label">${label}</span>
+        <span class="pf__old">${esc(change.from ?? '—')}</span>
+        <span class="arrow">→</span>
+        <span class="pf__new">${esc(change.to ?? '—')}</span>
+      </div>`;
+
+    const mediaRow = (label, beforeUrl, afterUrl, kind) => {
+      const thumb = (url) => url
+        ? `<img class="pf__${kind}" src="${esc(url)}" alt="" loading="lazy">`
+        : `<span class="pf__none">sin ${label}</span>`;
+      return `
+        <div class="pf__row">
+          <span class="pf__label">${label}</span>
+          ${thumb(beforeUrl)}
+          <span class="arrow">→</span>
+          ${thumb(afterUrl)}
+        </div>`;
+    };
+
+    if (changes.username) rows.push(nameRow('nombre', changes.username));
+    if (changes.global_name) rows.push(nameRow('display', changes.global_name));
+    if (meta.nick) rows.push(nameRow('apodo', meta.nick));
+    if (changes.avatar) rows.push(mediaRow('avatar', before?.avatar_url, after?.avatar_url, 'avatar'));
+    if (changes.banner) rows.push(mediaRow('banner', before?.banner_url, after?.banner_url, 'banner'));
+
+    return rows.length ? `<div class="pf">${rows.join('')}</div>` : '';
+  }
+
+  function card(event, isNew = false) {
     const meta = TYPES[event.event_type] || { label: 'Evento', icon: '•', cls: 'message', verb: event.event_type };
     const where = [];
     if (event.channel_name) where.push(`<span class="tag">#${esc(event.channel_name)}</span>`);
@@ -783,6 +971,10 @@
       body = `<div class="ev__body">${event.metadata?.camera ? 'Encendió la cámara' : 'Apagó la cámara'}</div>`;
     }
 
+    if (event.event_type === 'profile_update') {
+      body = profileBody(event);
+    }
+
     if (event.event_type === 'presence') {
       const from = STATUS[event.metadata?.from] || STATUS.desconocido;
       const to = STATUS[event.metadata?.to] || STATUS.desconocido;
@@ -807,10 +999,11 @@
     }
 
     return `
-      <article class="ev ev--${meta.cls}" data-id="${event.id}">
+      <article class="ev ev--${meta.cls}${isNew ? ' is-new' : ''}" data-id="${event.id}">
         <div class="ev__icon">${meta.icon}</div>
         <div>
           <header class="ev__head">
+            <span class="ev__avatar">${avatarInner(avatarFor(event.user_id), event.username, event.user_id)}</span>
             <span class="ev__user">${esc(event.username || event.user_id)}</span>
             <span class="ev__verb">${meta.verb}</span>
             <time class="ev__time" data-ts="${esc(event.created_at)}" title="${esc(new Date(event.created_at).toLocaleString('es'))}">${relative(event.created_at)}</time>
@@ -827,7 +1020,7 @@
       feed.innerHTML = `
         <div class="empty">
           <strong>Sin eventos todavía</strong>
-          Cuando un objetivo hable, se conecte o entre a voz, aparece acá.
+          Cuando un objetivo hable, se conecte, entre a voz o cambie su perfil, aparece acá.
         </div>`;
       $('#more').classList.add('hidden');
       return;
@@ -865,6 +1058,7 @@
     state.presence = data.presence || {};
     state.details = data.activity || {};
     state.voice = data.voice || {};
+    state.avatars = data.avatars || {};
 
     $('#stat-online').textContent = money.format(data.online ?? 0);
     $('#stat-targets').textContent = money.format(data.targets ?? 0);
@@ -932,7 +1126,7 @@
       const active = state.user === target.user_id;
       return `
         <div class="target ${active ? 'is-active' : ''}" data-user="${esc(target.user_id)}" title="Filtrar el feed por este objetivo">
-          <div class="target__avatar">${esc(initials(target.username))}</div>
+          <div class="target__avatar">${avatarInner(avatarFor(target.user_id), target.username, target.user_id)}</div>
           <div class="target__main">
             <div class="target__name">${esc(target.username || 'target')}</div>
             <div class="target__meta">${esc(target.note || target.user_id)}</div>
@@ -981,8 +1175,31 @@
       const fresh = rows.filter(matches).filter((row) => !state.events.some((event) => event.id === row.id));
       if (!fresh.length) return;
       state.events = fresh.concat(state.events).slice(0, 300);
-      renderFeed();
+
+      let avatarsChanged = false;
+      for (const row of fresh) {
+        const nextAvatar = row.event_type === 'profile_update' ? row.metadata?.after?.avatar_url : null;
+        if (nextAvatar && state.avatars[row.user_id] !== nextAvatar) {
+          state.avatars[row.user_id] = nextAvatar;
+          avatarsChanged = true;
+        }
+      }
+
+      // Prepend incremental: solo las cards nuevas animan, el resto no se toca.
+      const feed = $('#feed');
+      feed.querySelector('.empty')?.remove();
+      feed.insertAdjacentHTML('afterbegin', fresh.map((row) => card(row, true)).join(''));
+      while (feed.children.length > 300) feed.lastElementChild.remove();
+      requestAnimationFrame(() => {
+        feed.querySelectorAll('.ev.is-new').forEach((element) => element.classList.remove('is-new'));
+      });
+
+      if (avatarsChanged) renderTargets();
       if (fresh.some((row) => row.event_type === 'presence')) loadSummary().catch(() => {});
+      if (fresh.some((row) => row.event_type === 'profile_update')) {
+        loadTargets().catch(() => {});
+        loadSummary().catch(() => {});
+      }
     };
   }
 
@@ -1010,7 +1227,7 @@
     $('#app').classList.add('hidden');
     $('#setup').classList.add('hidden');
     $('#login').classList.remove('hidden');
-    $('#login-password').focus();
+    $('#login-username').focus();
   }
 
   function showApp() {
@@ -1020,17 +1237,12 @@
     $('#app').classList.remove('hidden');
   }
 
-  function showSetup(remoteAllowed) {
+  function showSetup() {
     state.authed = false;
     $('#login').classList.add('hidden');
     $('#app').classList.add('hidden');
     $('#setup').classList.remove('hidden');
-    if (!remoteAllowed) {
-      $('#setup-fields').classList.add('hidden');
-      $('#setup-copy').textContent = 'Este deploy todavía no tiene contraseña. Definí DASHBOARD_PASSWORD en el servidor (o ALLOW_REMOTE_SETUP=true) y reiniciá.';
-      return;
-    }
-    $('#setup-password').focus();
+    $('#setup-username').focus();
   }
 
   async function boot() {
@@ -1074,10 +1286,11 @@
 
   $('#login-form').addEventListener('submit', async (event) => {
     event.preventDefault();
+    const username = $('#login-username').value.trim();
     const password = $('#login-password').value;
     $('#login-error').textContent = '';
     try {
-      await api('/api/login', { method: 'POST', body: JSON.stringify({ password }) });
+      await api('/api/login', { method: 'POST', body: JSON.stringify({ username, password }) });
       $('#login-password').value = '';
       await boot();
     } catch (error) {
@@ -1224,6 +1437,7 @@
       }
       box.innerHTML = data.members.map((member) => `
         <div class="member">
+          <div class="member__avatar">${avatarInner(member.avatar_url, member.nickname || member.username, member.id)}</div>
           <div class="member__name">${esc(member.nickname || member.username)} <span class="member__id">${esc(member.id)}</span></div>
           <button class="btn btn--mini" data-add="${esc(member.id)}" data-name="${esc(member.username)}" type="button">Agregar</button>
         </div>`).join('');
@@ -1255,6 +1469,15 @@
       element.textContent = relative(element.dataset.ts);
     });
   }, 30_000);
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== '/' || event.metaKey || event.ctrlKey || event.altKey) return;
+    const tag = document.activeElement?.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    if ($('#settings').open || $('#picker').open) return;
+    event.preventDefault();
+    $('#search').focus();
+  });
 
   /* ------------------------------------------------------------- settings -- */
 
@@ -1302,13 +1525,18 @@
     $('#cfg-webhook').value = view.alertWebhook || '';
     $('#cfg-presence').value = view.selfPresence || '';
 
-    const source = view.passwordSource;
+    const source = view.accountSource;
     pill(
       '#cfg-pass-source',
-      source === 'env' ? 'variable de entorno' : source === 'file' ? 'guardada' : 'sin contraseña',
+      source === 'env' ? 'variable de entorno' : source === 'file' ? 'guardada' : 'sin cuenta',
       source === 'env' ? 'env' : source === 'file' ? 'on' : 'off'
     );
+    $('#cfg-account-username').value = view.username || '';
+    $('#cfg-account-username').disabled = source === 'env';
+    $('#cfg-pass-current').disabled = source === 'env';
+    $('#cfg-pass-next').disabled = source === 'env';
     $('#cfg-pass-save').disabled = source === 'env';
+    pill('#cfg-keys-count', String(view.keys ?? 0), view.keys ? 'on' : '');
 
     $('#cfg-meta').textContent = view.trackAll
       ? 'TRACK_ALL activo: se registran todos los usuarios de los servidores, no solo los objetivos.'
@@ -1318,6 +1546,7 @@
   async function loadSettings() {
     const view = await api('/api/settings');
     applySettings(view);
+    loadKeys().catch(() => {});
     return view;
   }
 
@@ -1466,26 +1695,106 @@
   });
 
   $('#cfg-pass-save').addEventListener('click', async () => {
+    const username = $('#cfg-account-username').value.trim();
     const current = $('#cfg-pass-current').value;
-    const next = $('#cfg-pass-next').value;
-    if (next.length < 8) return setMsg('#cfg-pass-msg', 'La nueva necesita 8 caracteres o más', 'bad');
-    setMsg('#cfg-pass-msg', 'Cambiando…', 'busy');
+    const password = $('#cfg-pass-next').value;
+    if (!username) return setMsg('#cfg-pass-msg', 'El usuario no puede quedar vacío', 'bad');
+    if (!current) return setMsg('#cfg-pass-msg', 'Poné la contraseña actual', 'bad');
+    if (password && password.length < 8) return setMsg('#cfg-pass-msg', 'La nueva necesita 8 caracteres o más', 'bad');
+    setMsg('#cfg-pass-msg', 'Guardando…', 'busy');
     try {
-      await api('/api/password', { method: 'POST', body: JSON.stringify({ current, next }) });
+      const data = await api('/api/account', {
+        method: 'POST',
+        body: JSON.stringify({ username, current, password }),
+      });
       $('#cfg-pass-current').value = '';
       $('#cfg-pass-next').value = '';
-      setMsg('#cfg-pass-msg', 'Contraseña actualizada', 'ok');
+      setMsg('#cfg-pass-msg', 'Cuenta actualizada: ' + data.username, 'ok');
       await loadSettings();
     } catch (error) {
       setMsg('#cfg-pass-msg', error.message, 'bad');
     }
   });
 
+  /* ---------------------------------------------------------------- keys -- */
+
+  function renderKeys(keys) {
+    const list = $('#cfg-keys-list');
+    pill('#cfg-keys-count', String(keys.length), keys.length ? 'on' : '');
+    if (!keys.length) {
+      list.innerHTML = '<div class="hint">Sin keys todavía.</div>';
+      return;
+    }
+    list.innerHTML = keys.map((key) => `
+      <div class="key">
+        <div class="key__main">
+          <div class="key__name">${esc(key.name)}</div>
+          <div class="key__meta">${esc(key.prefix)}… · creada ${esc(relative(key.created_at))} · usada ${key.last_used_at ? esc(relative(key.last_used_at)) : 'nunca'}</div>
+        </div>
+        <button class="btn btn--danger btn--mini" data-revoke="${esc(key.id)}" type="button">Revocar</button>
+      </div>`).join('');
+  }
+
+  async function loadKeys() {
+    const data = await api('/api/keys');
+    renderKeys(data.keys || []);
+    return data.keys || [];
+  }
+
+  $('#cfg-key-create').addEventListener('click', async () => {
+    const name = $('#cfg-key-name').value.trim();
+    setMsg('#cfg-keys-msg', 'Creando…', 'busy');
+    try {
+      const data = await api('/api/keys', { method: 'POST', body: JSON.stringify({ name }) });
+      $('#cfg-key-name').value = '';
+      $('#cfg-key-new').innerHTML = `
+        <div class="key__token">
+          <code>${esc(data.token)}</code>
+          <button class="btn btn--ghost btn--mini" type="button" data-copy="${esc(data.token)}">Copiar</button>
+        </div>
+        <div class="hint">Copiala ahora: no se vuelve a mostrar.</div>`;
+      setMsg('#cfg-keys-msg', 'Key creada', 'ok');
+      await loadKeys();
+    } catch (error) {
+      setMsg('#cfg-keys-msg', error.message, 'bad');
+    }
+  });
+
+  $('#cfg-key-new').addEventListener('click', async (event) => {
+    const button = event.target.closest('[data-copy]');
+    if (!button) return;
+    try {
+      await navigator.clipboard.writeText(button.dataset.copy);
+      button.textContent = 'Copiada';
+      setTimeout(() => { button.textContent = 'Copiar'; }, 1600);
+    } catch {
+      toast('No se pudo copiar: seleccioná el texto a mano');
+    }
+  });
+
+  $('#cfg-keys-list').addEventListener('click', async (event) => {
+    const button = event.target.closest('[data-revoke]');
+    if (!button) return;
+    if (!confirm('¿Revocar esta key? Los scripts que la usen dejan de funcionar.')) return;
+    try {
+      await api('/api/keys/' + encodeURIComponent(button.dataset.revoke), { method: 'DELETE' });
+      setMsg('#cfg-keys-msg', 'Key revocada', 'ok');
+      await loadKeys();
+    } catch (error) {
+      setMsg('#cfg-keys-msg', error.message, 'bad');
+    }
+  });
+
   $('#setup-form').addEventListener('submit', async (event) => {
     event.preventDefault();
+    const username = $('#setup-username').value.trim();
     const password = $('#setup-password').value;
     const repeat = $('#setup-repeat').value;
     $('#setup-error').textContent = '';
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{2,31}$/.test(username)) {
+      $('#setup-error').textContent = 'Usuario: 3 a 32 caracteres, letras, números, punto, guion o guion bajo';
+      return;
+    }
     if (password.length < 8) { $('#setup-error').textContent = 'Mínimo 8 caracteres'; return; }
     if (password !== repeat) { $('#setup-error').textContent = 'Las contraseñas no coinciden'; return; }
 
@@ -1493,10 +1802,11 @@
       const response = await fetch('/api/setup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password }),
+        body: JSON.stringify({ username, password }),
       });
       const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data.error || 'No se pudo crear la contraseña');
+      if (!response.ok) throw new Error(data.error || 'No se pudo crear la cuenta');
+      $('#setup-username').value = '';
       $('#setup-password').value = '';
       $('#setup-repeat').value = '';
       await boot();
@@ -1516,8 +1826,7 @@
         return;
       }
       if (session.needsSetup) {
-        const info = await fetch('/api/setup').then((res) => res.json()).catch(() => ({}));
-        showSetup(Boolean(info.remoteAllowed));
+        showSetup();
         return;
       }
     } catch {
