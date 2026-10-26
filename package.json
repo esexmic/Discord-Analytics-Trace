@@ -1,0 +1,22 @@
+{
+  "name": "watchtower",
+  "version": "1.1.0",
+  "private": true,
+  "description": "Monitor de actividad de Discord via user token + Supabase + dashboard web",
+  "main": "src/index.js",
+  "engines": {
+    "node": "22.x"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "demo": "node scripts/demo.js",
+    "test": "node scripts/smoke.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.4",
+    "discord.js-selfbot-v13": "^3.4.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  }
+}

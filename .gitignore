@@ -1,0 +1,9 @@
+node_modules/
+.env
+.env.local
+data/
+*.log
+.DS_Store
+
+# Notas internas del agente, no forman parte del producto
+AGENTS.md
