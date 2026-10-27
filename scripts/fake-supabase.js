@@ -251,6 +251,37 @@ function createFakeSupabase(store = new Map()) {
           },
         };
       }
+      if (name === 'admin_usage') {
+        return {
+          then(resolve, reject) {
+            try {
+              const buckets = new Map();
+              const bucket = (owner) => {
+                const key = String(owner);
+                if (!buckets.has(key)) {
+                  buckets.set(key, { owner: key, total: 0, last_event_at: null, targets: 0 });
+                }
+                return buckets.get(key);
+              };
+              for (const row of store.get('events') || []) {
+                if (params.p_since && String(row.created_at) < String(params.p_since)) continue;
+                const entry = bucket(row.owner);
+                entry.total += 1;
+                if (!entry.last_event_at || String(row.created_at) > entry.last_event_at) {
+                  entry.last_event_at = row.created_at;
+                }
+              }
+              for (const row of store.get('targets') || []) bucket(row.owner).targets += 1;
+              resolve({ data: [...buckets.values()], error: null });
+            } catch (error) {
+              reject(error);
+            }
+          },
+          catch(reject) {
+            return this.then(undefined, reject);
+          },
+        };
+      }
       return {
         then(resolve) {
           resolve({ data: null, error: { message: `function ${name} does not exist` } });

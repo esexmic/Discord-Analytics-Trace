@@ -47,6 +47,8 @@ const state = {
   toastTimer: 0,
   dbToastAt: 0,
   hwidReady: false,
+  admin: null,
+  adminSeq: 0,
 };
 
 const EVENT_TYPES = [
@@ -347,6 +349,13 @@ function renderAccount() {
   $('set-meta').textContent = `@${account.username || '—'} · rol ${account.role || 'user'} · último acceso ${
     account.last_login_at ? timeAgo(account.last_login_at) : '—'}`;
   show($('onboarding'), !discord.linked && !state.bot?.configured);
+  if (account.role !== 'admin') {
+    state.admin = null;
+    show($('open-admin'), false);
+    closeModal(admin);
+  } else {
+    show($('open-admin'), true);
+  }
 }
 
 function renderTargets() {
@@ -1429,6 +1438,276 @@ $('set-hwid-clear').addEventListener('click', () => {
     });
 });
 
+/* ---------------------------------------------------------------- admin -- */
+
+const admin = $('admin');
+
+function stamp(iso) {
+  const then = Date.parse(iso);
+  if (!Number.isFinite(then)) return '';
+  const date = new Date(then);
+  return `${date.toLocaleDateString()} ${clockTime(iso)}`;
+}
+
+function browserName(userAgent) {
+  const ua = String(userAgent || '');
+  if (!ua) return '';
+  const brands = [['Edg', 'Edge'], ['OPR', 'Opera'], ['Firefox', 'Firefox'], ['Chrome', 'Chrome'], ['Safari', 'Safari']];
+  const systems = [['Windows NT', 'Windows'], ['Android', 'Android'], ['iPhone', 'iOS'], ['iPad', 'iPadOS'], ['Mac OS X', 'macOS'], ['Linux', 'Linux']];
+  const brand = brands.find(([token]) => ua.includes(`${token}/`));
+  const system = systems.find(([token]) => ua.includes(token));
+  const version = brand ? (ua.match(new RegExp(`${brand[0]}/(\\d+)`)) || [])[1] : null;
+  return [brand ? `${brand[1]} ${version || ''}`.trim() : 'navegador', system && system[1]].filter(Boolean).join(' · ');
+}
+
+function sumItem(value, label) {
+  const item = el('div', 'asum');
+  item.append(el('div', 'asum__v', String(value ?? 0)));
+  item.append(el('div', 'asum__l', label));
+  return item;
+}
+
+function acctField(label, value, cls) {
+  const wrap = el('div', `acct__f${cls ? ` ${cls}` : ''}`);
+  wrap.append(el('span', 'acct__k', label));
+  wrap.append(el('span', 'acct__v', value || '—'));
+  return wrap;
+}
+
+function adminRun(button, run) {
+  button.disabled = true;
+  Promise.resolve()
+    .then(run)
+    .catch((error) => {
+      if (error.name !== 'AbortError') toast(error.message, 'bad');
+      button.disabled = false;
+    });
+}
+
+function accountCard(row) {
+  const card = el('div', 'acct');
+  if (row.status === 'blocked') card.classList.add('is-blocked');
+  if (row.self) card.classList.add('is-self');
+
+  const head = el('div', 'acct__head');
+  head.append(el('div', 'acct__name', row.username));
+  const chips = el('div', 'acct__chips');
+  if (row.role === 'admin') chips.append(el('span', 'atag atag--admin', 'admin'));
+  if (row.self) chips.append(el('span', 'atag', 'vos'));
+  if (row.legacy) chips.append(el('span', 'atag', 'deploy'));
+  if (row.status === 'blocked') chips.append(el('span', 'atag atag--bad', 'bloqueada'));
+  if (row.hasToken) chips.append(el('span', 'atag atag--ok', 'token'));
+  head.append(chips);
+  card.append(head);
+
+  const discord = row.discord || {};
+  const grid = el('div', 'acct__grid');
+  grid.append(acctField('discord', discord.linked ? [discord.username, discord.user_id].filter(Boolean).join(' · ') : 'sin token'));
+  grid.append(acctField('token', discord.token_preview, 'acct__f--mono'));
+  grid.append(acctField('último ingreso', row.last_login_at ? `${stamp(row.last_login_at)} · ${timeAgo(row.last_login_at)}` : ''));
+  grid.append(acctField('actividad', row.last_seen_at ? timeAgo(row.last_seen_at) : ''));
+  grid.append(acctField('ip', row.last_ip, 'acct__f--mono'));
+  grid.append(acctField('navegador', browserName(row.user_agent)));
+  grid.append(acctField('dispositivo', row.hwid_linked ? (row.hwid_label || 'vinculado') : 'sin vincular'));
+  grid.append(acctField('usado', `${row.events_7d || 0} ev. 7d · ${row.targets || 0} obj.`));
+  grid.append(acctField('sesiones', `${row.login_count || 0} ingresos · ${row.boot_count || 0} aperturas`));
+  grid.append(acctField('último evento', row.last_event_at ? timeAgo(row.last_event_at) : ''));
+  grid.append(acctField('creada', stamp(row.created_at)));
+  if (row.block_reason) grid.append(acctField('motivo del bloqueo', row.block_reason));
+  card.append(grid);
+
+  const actions = el('div', 'acct__actions');
+  const forms = el('div', 'acct__forms');
+
+  const toggle = (id, label, variant) => {
+    const button = el('button', `btn btn--mini ${variant || 'btn--ghost'}`, label);
+    button.type = 'button';
+    button.addEventListener('click', () => {
+      const box = forms.querySelector(`[data-form="${id}"]`);
+      const open = !box.classList.toggle('hidden');
+      for (const other of forms.children) if (other !== box) other.classList.add('hidden');
+      if (open) box.querySelector('input')?.focus();
+    });
+    actions.append(button);
+    return button;
+  };
+
+  const formBox = (id) => {
+    const box = el('div', 'acct__form hidden');
+    box.dataset.form = id;
+    forms.append(box);
+    return box;
+  };
+
+  const reload = () => loadAdmin();
+
+  if (row.legacy) {
+    actions.append(el('span', 'acct__note', 'Cuenta del deploy: la contraseña se cambia en las variables.'));
+  } else if (!row.self) {
+    // Bloqueo: con motivo, para que la persona lo vea al intentar entrar.
+    const box = formBox('block');
+    const input = el('input', 'small');
+    input.type = 'text';
+    input.placeholder = 'motivo (opcional)';
+    input.autocomplete = 'off';
+    const ok = el('button', 'btn btn--mini', 'Bloquear');
+    ok.type = 'button';
+    ok.addEventListener('click', () => adminRun(ok, async () => {
+      await api(`/api/admin/accounts/${encodeURIComponent(row.username)}/status`, {
+        method: 'POST', body: { status: 'blocked', reason: input.value.trim() },
+      });
+      toast(`${row.username} bloqueada`);
+      await reload();
+    }));
+    box.append(input, ok);
+
+    toggle('block', row.status === 'blocked' ? 'Cambiar motivo' : 'Bloquear', 'btn--danger');
+  }
+
+  if (row.status === 'blocked') {
+    const button = el('button', 'btn btn--ghost btn--mini', 'Desbloquear');
+    button.type = 'button';
+    button.addEventListener('click', () => adminRun(button, async () => {
+      await api(`/api/admin/accounts/${encodeURIComponent(row.username)}/status`, {
+        method: 'POST', body: { status: 'active' },
+      });
+      toast(`${row.username} activada`);
+      await reload();
+    }));
+    actions.append(button);
+  }
+
+  if (!row.legacy) {
+    // El hash scrypt no se lee: el admin fija una contraseña nueva.
+    const box = formBox('password');
+    const input = el('input', 'small');
+    input.type = 'password';
+    input.placeholder = 'contraseña nueva (mín. 8)';
+    input.autocomplete = 'new-password';
+    const ok = el('button', 'btn btn--mini', 'Fijar');
+    ok.type = 'button';
+    ok.addEventListener('click', () => {
+      const value = input.value;
+      if (value.length < 8) { toast('La contraseña necesita 8 caracteres o más', 'bad'); return; }
+      adminRun(ok, async () => {
+        await api(`/api/admin/accounts/${encodeURIComponent(row.username)}/password`, {
+          method: 'POST', body: { password: value },
+        });
+        toast(`Contraseña de ${row.username} cambiada`);
+        await reload();
+      });
+    });
+    box.append(input, ok);
+    toggle('password', 'Contraseña');
+  }
+
+  if (row.hwid_linked) {
+    const button = el('button', 'btn btn--ghost btn--mini', 'Desvincular equipo');
+    button.type = 'button';
+    button.addEventListener('click', () => adminRun(button, async () => {
+      await api(`/api/admin/accounts/${encodeURIComponent(row.username)}/unlink`, { method: 'POST' });
+      toast(`${row.username} sin dispositivo`);
+      await reload();
+    }));
+    actions.append(button);
+  }
+
+  if (!row.self && !row.legacy) {
+    const button = el('button', 'btn btn--ghost btn--mini', row.role === 'admin' ? 'Quitar admin' : 'Hacer admin');
+    button.type = 'button';
+    button.addEventListener('click', () => adminRun(button, async () => {
+      await api(`/api/admin/accounts/${encodeURIComponent(row.username)}/role`, {
+        method: 'POST', body: { role: row.role === 'admin' ? 'user' : 'admin' },
+      });
+      toast('Rol actualizado');
+      await reload();
+    }));
+    actions.append(button);
+  }
+
+  if (!row.self && !row.legacy) {
+    const button = el('button', 'btn btn--danger btn--mini', 'Borrar');
+    button.type = 'button';
+    let armed = 0;
+    button.addEventListener('click', () => {
+      if (!armed) {
+        armed = Date.now();
+        button.textContent = 'Confirmar borrado';
+        setTimeout(() => {
+          if (!button.disabled && Date.now() - armed >= 4000) { armed = 0; button.textContent = 'Borrar'; }
+        }, 4200);
+        return;
+      }
+      armed = 0;
+      button.textContent = 'Borrando…';
+      adminRun(button, async () => {
+        await api(`/api/admin/accounts/${encodeURIComponent(row.username)}`, { method: 'DELETE' });
+        toast(`${row.username} borrada con sus datos`);
+        await reload();
+      });
+    });
+    actions.append(button);
+  }
+
+  card.append(actions, forms);
+  return card;
+}
+
+function renderAdmin() {
+  const data = state.admin;
+  const list = $('admin-list');
+  if (!data) return;
+
+  const totals = data.totals || {};
+  $('admin-summary').replaceChildren(
+    sumItem(totals.accounts, 'cuentas'),
+    sumItem(totals.admins, 'admins'),
+    sumItem(totals.blocked, 'bloqueadas'),
+    sumItem(totals.withToken, 'con token'),
+  );
+
+  const hints = [];
+  if (data.approximate) hints.push('El uso es aproximado: la función admin_usage no está en la base. Volvé a correr schema.sql.');
+  if (data.db && !data.db.configured) hints.push('Sin base de datos: sólo se ven las cuentas del archivo local.');
+  const note = $('admin-note');
+  note.textContent = hints.join(' ');
+  show(note, hints.length > 0);
+
+  const rows = data.accounts || [];
+  if (!rows.length) {
+    list.replaceChildren(el('div', 'hint', 'No hay cuentas dadas de alta todavía.'));
+    return;
+  }
+  list.replaceChildren(...rows.map(accountCard));
+}
+
+async function loadAdmin() {
+  const seq = ++state.adminSeq;
+  $('admin-error').textContent = '';
+  $('admin-list').replaceChildren(el('div', 'hint', 'Cargando cuentas…'));
+  try {
+    const data = await api('/api/admin/accounts');
+    if (seq !== state.adminSeq) return;
+    state.admin = data;
+    renderAdmin();
+  } catch (error) {
+    if (seq !== state.adminSeq) return;
+    $('admin-list').replaceChildren();
+    $('admin-error').textContent = error.message;
+    if (error.status === 401) { closeModal(admin); toAuth(); }
+    if (error.status === 403) closeModal(admin);
+  }
+}
+
+$('open-admin').addEventListener('click', () => {
+  openModal(admin);
+  loadAdmin();
+});
+$('admin-refresh').addEventListener('click', () => loadAdmin());
+admin.addEventListener('click', (event) => {
+  if (event.target === admin || event.target.closest('[data-close]')) closeModal(admin);
+});
+
 /* --------------------------------------------------------------- sidebar -- */
 
 function openSidebar(on) {
@@ -1461,6 +1740,10 @@ function toAuth() {
   clearInterval(state.botTimer);
   state.botTimer = 0;
   state.account = null;
+  state.admin = null;
+  state.adminSeq += 1;
+  show($('open-admin'), false);
+  closeModal(admin);
   show($('app'), false);
   show($('auth'), true);
   show($('boot'), false);

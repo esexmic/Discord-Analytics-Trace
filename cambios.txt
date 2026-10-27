@@ -193,3 +193,41 @@ FLUJO NUEVO
 PENDIENTE PARA LA PÁGINA WEB FUTURA
 - (se mantiene la lista de v1.3; ahora los tokens viven en public/app.css en
   vez de inline)
+
+------------------------------------------------------------
+v1.5 — 26/10/2026
+------------------------------------------------------------
+
+SUPERFICIE NUEVA: GESTIÓN DE CUENTAS (rol admin)
+- Sidebar → "Gestionar cuentas", solo si account.role === 'admin'. Botón
+  .rowbtn--admin (morado, mismo token --purple del design system).
+- Dialog #admin con clase extra .modal--wide (920px) y .modal__tools a la
+  derecha del título (Actualizar + cerrar). En móvil cae en el mismo sheet
+  bottom-sheet de los otros dialogs.
+
+CONTENIDO DE CADA TARJETA (.acct)
+- .acct__head: usuario + .acct__chips con .atag (admin / vos / deploy /
+  bloqueada / token).
+- .acct__grid (auto-fit, minmax 180px): discord, token enmascarado, último
+  ingreso (fecha + hora + hace cuánto), actividad, ip, navegador (parseado del
+  user-agent a "Chrome 126 · Windows"), dispositivo, uso 7d (eventos y
+  objetivos), sesiones (ingresos y aperturas), último evento, alta, y motivo
+  del bloqueo si existe.
+- .acct__actions: Bloquear / Desbloquear / Contraseña / Desvincular equipo /
+  Hacer admin · Quitar admin / Borrar. Las dos primeras de "Contraseña" y
+  "Bloquear" abren un .acct__form inline (input + confirmar) en vez de prompt.
+- .acctsum arriba: cuentas, admins, bloqueadas, con token. .acctnote avisa si
+  el uso es aproximado (falta admin_usage en la base) o si no hay DB.
+
+ESTADO Y FLUJO
+- state.admin + state.adminSeq; loadAdmin() reemplaza la lista completa tras
+  cada acción, así que nunca queda una tarjeta con datos viejos.
+- Borrar pide confirmación en dos clics (el botón pasa a "Confirmar borrado" y
+  se revierte solo a los 4s).
+- Los guards del server (403/409/404/503) se muestran como toast; un 401
+  cierra el dialog y vuelve al login, un 403 lo cierra directo.
+- toAuth() e renderAccount() esconden y limpian la gestión para cuentas user.
+
+NO CAMBIA
+- Tokens y contraseñas siguen sin salir del server: el admin ve token_preview
+  y fija una contraseña nueva, nunca lee la vieja (hash scrypt).

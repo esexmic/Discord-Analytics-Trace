@@ -1045,6 +1045,16 @@ async function stop(owner) {
   return instance.stop();
 }
 
+/** Desconecta y libera el runtime de una cuenta que el admin borró. */
+async function forget(owner) {
+  const key = String(owner || '').trim().toLowerCase();
+  const instance = runtimes.get(key);
+  if (!instance) return false;
+  await instance.stop().catch(() => {});
+  runtimes.delete(key);
+  return true;
+}
+
 async function stopAll() {
   const all = [...runtimes.values()];
   await Promise.all(all.map((instance) => instance.stop().catch(() => {})));
@@ -1152,6 +1162,7 @@ module.exports = {
   start,
   reconnect,
   stop,
+  forget,
   stopAll,
   startAll,
   getClient,

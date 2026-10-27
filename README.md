@@ -29,9 +29,9 @@ Los mensajes solo se ven en servidores mutuos (es lo único a lo que la cuenta t
 - Railway para el host — free trial / Hobby
 
 ```
-schema.sql              tablas (accounts, targets, events) + índices + RLS + event_stats + prune_events
+schema.sql              tablas (accounts, targets, events) + índices + RLS + event_stats + admin_usage + prune_events
 src/settings.js         configuración de infraestructura (env + data/settings.json); ya no se edita desde el panel
-src/accounts.js         cuentas, scrypt, HWID, token de Discord por cuenta y sesiones
+src/accounts.js         cuentas, scrypt, HWID, token de Discord por cuenta, sesiones y las funciones que usa el admin
 src/net.js              fetch con deadline, reintentos y causa real del error
 src/config.js           perillas de arranque (puerto, TRACK_ALL, targets semilla)
 src/db.js               cliente Supabase perezoso + probe + insert batch
@@ -83,9 +83,32 @@ Cada cuenta queda **atada al dispositivo** que la creó: el navegador calcula un
 
 `DASHBOARD_USERNAME` / `DASHBOARD_PASSWORD` siguen funcionando como **cuenta legacy del deploy**: entra sin HWID y se migra sola a la tabla `accounts` en el primer login. Su contraseña se cambia en las variables del deploy, no desde el panel.
 
+### Gestión de cuentas (rol admin)
+
+La cuenta con `role = admin` ve un botón **Gestionar cuentas** en el sidebar (las `user` no lo ven, y la API responde 403). Cada tarjeta muestra y permite operar:
+
+| Dato | De dónde sale |
+| --- | --- |
+| usuario, rol, estado (`active` / `blocked`) | `accounts` |
+| cuenta de Discord vinculada y **token enmascarado** (`sofi.d…oken`) | `discord_*` de cada cuenta |
+| último ingreso, ip y navegador del ingreso | `last_login_at`, `last_ip`, `user_agent` |
+| actividad reciente y aperturas del panel | `last_seen_at`, `boot_count` (lo marca `/api/bootstrap`) |
+| logins totales, fecha de alta | `login_count`, `created_at` |
+| eventos y objetivos de los últimos 7 días | RPC `admin_usage` (si falta, se calcula en memoria y se marca *aproximado*) |
+| dispositivo vinculado | `hwid_label` |
+
+Acciones: **bloquear** (con motivo, reversible), **desbloquear**, **fijar contraseña nueva**, **desvincular equipo**, **subir/bajar de admin** y **borrar** (con confirmación en dos clics).
+
+Dos cosas por diseño:
+
+- La contraseña **no se lee**: en la base hay un hash scrypt con salt por cuenta, así que el admin la reemplaza, no la ve. El reseteo sube `session_version` y cierra las sesiones abiertas de esa persona.
+- El token de Discord **no se devuelve completo**: el panel muestra solo el principio y el final, alcanza para reconocerlo. Cualquier operación con el token se hace del lado del server.
+
+Borrar una cuenta también borra sus objetivos y sus eventos y libera su gateway de Discord. Bloquearla corta de inmediato sus sesiones (la cookie deja de validar) y el login responde 403 con el motivo. El admin no puede bloquearse, borrarse a sí mismo, ni dejar el panel sin el último admin.
+
 ### Aislar el deploy
 
-La web se cierra por registro, no por key: cualquiera que tenga la URL puede crear cuenta, pero cada cuenta solo ve sus propios objetivos y eventos. Si querés restringir quién entra, hacelo afuera del app (Railway Private Networking, Basic Auth en un proxy, o simplemente no repartir la URL y borrar las cuentas que no corresponda desde Supabase). El server ya no tiene API keys ni key de registro.
+La web se cierra por registro, no por key: cualquiera que tenga la URL puede crear cuenta, pero cada cuenta solo ve sus propios objetivos y eventos. Quien administra bloquea o borra desde el panel (**Gestionar cuentas**), sin tocar Supabase. Si además querés cerrar la puerta por red, hacelo afuera del app (Railway Private Networking o Basic Auth en un proxy). El server ya no tiene API keys ni key de registro.
 
 ## Demo sin credenciales
 
@@ -93,12 +116,12 @@ La web se cierra por registro, no por key: cualquiera que tenga la URL puede cre
 npm run demo
 ```
 
-Abre `http://localhost:3311`, usuario `admin`, contraseña `demo`. Carga 3 objetivos de mentira, eventos de todos los tipos y un mensaje nuevo cada 30s para ver el feed en vivo. No toca Supabase ni Discord.
+Abre `http://localhost:3311`, usuario `admin`, contraseña `demo`. Carga 3 objetivos de mentira, eventos de todos los tipos y un mensaje nuevo cada 30s para ver el feed en vivo. También crea dos cuentas para probar la gestión del admin: `sofi` (con token de mentira y actividad) y `tomi` (bloqueada, con motivo). No toca Supabase ni Discord.
 
 ## 1. Supabase
 
 1. Crear proyecto en https://supabase.com (free).
-2. **SQL Editor → New query** → pegar **todo** `schema.sql` → **Run**. El archivo es idempotente: crea lo que falta y hace backfill de las columnas `owner` sobre datos existentes, así que se puede volver a correr sobre una base vieja.
+2. **SQL Editor → New query** → pegar **todo** `schema.sql` → **Run**. El archivo es idempotente: crea lo que falta y hace backfill de las columnas `owner` sobre datos existentes, así que se puede volver a correr sobre una base vieja. **Si ya venías con la v2, volvé a correrlo**: la v3 agrega `status`, `block_reason`, `login_count`, `boot_count`, `last_seen_at`, `user_agent` y la función `admin_usage`, que necesita el panel de gestión.
 3. **Project Settings → API** → copiar en `.env`:
    - `Project URL` → `SUPABASE_URL`
    - `service_role` key (secret) → `SUPABASE_SERVICE_KEY`
@@ -107,7 +130,7 @@ La `service_role` bypassea RLS. No la pongas en el frontend ni en un repo públi
 
 Si el panel dice *"Falta correr schema.sql"*, faltó el paso 2.
 
-> **Venís de una versión anterior:** hay que volver a correr `schema.sql`. Las tablas ganaron la columna `owner` (targets y eventos), la cuenta guarda su token de Discord y existe el RPC `event_stats`. Sin ese paso el panel muestra el error de schema en el banner superior en vez de quedar mudo.
+> **Venís de una versión anterior:** hay que volver a correr `schema.sql`. Las tablas ganaron la columna `owner` (targets y eventos), la cuenta guarda su token de Discord, existen los RPC `event_stats` y `admin_usage` y `accounts` ganó las columnas de gestión (`status`, `block_reason`, `login_count`, `boot_count`, `last_seen_at`, `user_agent`). Sin ese paso el panel muestra el error de schema en el banner superior en vez de quedar mudo; la gestión de cuentas funciona igual pero marca el uso como *aproximado*.
 
 ## 2. Token de Discord
 
@@ -217,6 +240,12 @@ Todo bajo cookie de sesión salvo `/api/login`, `/api/register`, `/api/recover-d
 | POST | `/api/bot/disconnect` | desconectar el gateway propio |
 | PUT | `/api/account` | `{ current, username?, password? }` → cambiar usuario/contraseña (sube `session_version`) |
 | DELETE | `/api/account/hwid` | `{ password }` → desvincular el dispositivo y cerrar sesiones |
+| GET | `/api/admin/accounts` | **(admin)** todas las cuentas con ip, navegador, uso, token enmascarado y totales |
+| POST | `/api/admin/accounts/:user/status` | `{ status: "active"\|"blocked", reason? }` → bloquear o reactivar (cierra sus sesiones) |
+| POST | `/api/admin/accounts/:user/password` | `{ password }` → fijar contraseña nueva sin leer la vieja |
+| POST | `/api/admin/accounts/:user/role` | `{ role: "admin"\|"user" }` → no deja el panel sin admin |
+| POST | `/api/admin/accounts/:user/unlink` | desvincular el dispositivo de esa cuenta |
+| DELETE | `/api/admin/accounts/:user` | borrar la cuenta con sus objetivos, eventos y gateway |
 | GET | `/health` | healthcheck para Railway (`db`, `targets`) |
 | GET | `/api/health` | ping sin autenticar |
 
@@ -239,5 +268,6 @@ No hay `/api/keys`, `/api/registration-key` ni `/api/settings/test`: se borraron
   select cron.schedule('prune-events', '0 3 * * *', $$select prune_events(90)$$);
   ```
 - **Seguridad del dashboard**: cookie HMAC HttpOnly (+ `Secure` detrás de HTTPS) con `session_version` revocable y revocación en memoria al logout, contraseñas con scrypt + salt, HWID como sha256, rate limit de intentos fallidos (12/min por IP), `robots.txt` con `Disallow: /`, token de Discord y hashes fuera de toda respuesta de la API.
+- **Gestión sin secretos visibles**: el panel de admin arma su vista con `publicView()`, que nunca incluye `password_hash`, `password_salt`, `hwid_hash` ni el token completo (solo `token_preview`). Bloquear, resetear contraseña o desvincular suben `session_version`, así que la persona pierde las sesiones abiertas en el acto; borrar libera el gateway y limpia `targets`/`events` de esa cuenta. El `user_agent` se guarda recortado a 240 caracteres desde la request, no de un tracker.
 - **Red resiliente**: `src/net.js` pone deadline de 12s y reintenta solo conexiones que todavía no se establecieron (no duplica escrituras). `targets.refresh` entra en backoff de 30s tras un fallo y el panel muestra el error real en vez de quedar mudo.
 - **Webhook opcional**: `ALERT_WEBHOOK` manda un mensaje a un webhook de Discord en cada conexión/desconexión, entrada/salida de voz y stream.

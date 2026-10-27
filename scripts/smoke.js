@@ -647,6 +647,262 @@ test('api: logout limpia la cookie y /api/session informa sin sesión', async ()
   }
 });
 
+/* ------------------------------------------------------------------ admin -- */
+
+const json = (cookie) => ({ 'content-type': 'application/json', cookie });
+
+async function registerUser(base, { username, password, hwid, agent }) {
+  const response = await fetch(`${base}/api/register`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'user-agent': agent || 'SmokeTest/1.0 (Windows NT 10.0)' },
+    body: JSON.stringify({ username, password, hwid, hwid_label: 'Windows · Chrome' }),
+  });
+  const body = await response.json();
+  return { response, body, cookie: response.headers.get('set-cookie')?.split(';')[0] || '' };
+}
+
+test('admin: acceso, uso de la página y token enmascarado', async () => {
+  const { server, base } = await listen();
+  const NAME = 'gestionada';
+
+  try {
+    const anon = await fetch(`${base}/api/admin/accounts`);
+    assert.strictEqual(anon.status, 401, 'la gestión exige sesión');
+
+    const victim = await registerUser(base, { username: NAME, password: 'clave-de-gestion-1', hwid: 'd'.repeat(64) });
+    assert.strictEqual(victim.response.status, 200);
+
+    const notAdmin = await fetch(`${base}/api/admin/accounts`, { headers: { cookie: victim.cookie } });
+    assert.strictEqual(notAdmin.status, 403, 'un usuario común no ve la gestión');
+    assert.strictEqual((await notAdmin.json()).code, 'forbidden');
+
+    const { cookie } = await login(base, OWNER, 'test-password', HWID_A);
+    await fetch(`${base}/api/bootstrap`, { headers: { cookie } });
+
+    const list = await (await fetch(`${base}/api/admin/accounts`, { headers: { cookie } })).json();
+    assert.strictEqual(list.window, '7d');
+
+    const row = list.accounts.find((entry) => entry.username === NAME);
+    assert.ok(row, 'la cuenta registrada aparece en la lista');
+    assert.strictEqual(row.role, 'user');
+    assert.strictEqual(row.status, 'active');
+    assert.strictEqual(row.self, false);
+    assert.strictEqual(row.legacy, false);
+    assert.strictEqual(row.hwid_linked, true);
+    assert.strictEqual(row.hwid_label, 'Windows · Chrome');
+    assert.match(String(row.last_ip), /127\.0\.0\.1|::1/, 'la ip del registro queda guardada');
+    assert.match(String(row.user_agent), /SmokeTest/, 'el navegador del registro queda guardado');
+    assert.ok(row.login_count >= 1);
+    assert.ok(row.created_at);
+
+    const mine = list.accounts.find((entry) => entry.username === OWNER);
+    assert.strictEqual(mine.legacy, true, 'la cuenta del deploy se marca como legacy');
+    assert.strictEqual(mine.self, true);
+    assert.ok(mine.boot_count >= 1, 'las aperturas del panel se cuentan');
+    assert.ok(mine.last_seen_at, 'la actividad reciente queda registrada');
+    assert.ok(list.totals.admins >= 1);
+
+    await accounts.saveDiscord(NAME, {
+      token: 'victima.token.secreto.victima.token',
+      userId: '777777777777777777',
+      username: 'Victima',
+      avatar: null,
+    });
+    const withToken = await (await fetch(`${base}/api/admin/accounts`, { headers: { cookie } })).json();
+    const updated = withToken.accounts.find((entry) => entry.username === NAME);
+    assert.strictEqual(updated.hasToken, true);
+    assert.strictEqual(updated.discord.username, 'Victima');
+    assert.match(String(updated.discord.token_preview), /…/, 'el token se muestra recortado');
+    assert.ok(!JSON.stringify(withToken).includes('secreto'), 'el token completo nunca sale al panel');
+    assert.ok(withToken.totals.withToken >= 1);
+  } finally {
+    server.close();
+  }
+});
+
+test('admin: bloquear corta la sesión y desbloquear la devuelve', async () => {
+  const { server, base } = await listen();
+  const NAME = 'bloqueada';
+  const CLAVE = 'clave-de-bloqueada-1';
+
+  try {
+    const victim = await registerUser(base, { username: NAME, password: CLAVE, hwid: 'e'.repeat(64) });
+    const alive = await fetch(`${base}/api/bootstrap`, { headers: { cookie: victim.cookie } });
+    assert.strictEqual(alive.status, 200, 'antes del bloqueo la sesión funciona');
+
+    const { cookie } = await login(base, OWNER, 'test-password', HWID_A);
+
+    const self = await fetch(`${base}/api/admin/accounts/${OWNER}/status`, {
+      method: 'POST', headers: json(cookie), body: JSON.stringify({ status: 'blocked' }),
+    });
+    assert.strictEqual(self.status, 409, 'el admin no se bloquea a sí mismo');
+
+    const invalid = await fetch(`${base}/api/admin/accounts/${NAME}/status`, {
+      method: 'POST', headers: json(cookie), body: JSON.stringify({ status: 'deleting' }),
+    });
+    assert.strictEqual(invalid.status, 400);
+
+    const missing = await fetch(`${base}/api/admin/accounts/noexiste/status`, {
+      method: 'POST', headers: json(cookie), body: JSON.stringify({ status: 'blocked' }),
+    });
+    assert.strictEqual(missing.status, 404);
+
+    const block = await fetch(`${base}/api/admin/accounts/${NAME}/status`, {
+      method: 'POST', headers: json(cookie), body: JSON.stringify({ status: 'blocked', reason: 'comparte la cuenta' }),
+    });
+    assert.strictEqual(block.status, 200);
+    assert.strictEqual((await block.json()).account.status, 'blocked');
+
+    const dead = await fetch(`${base}/api/bootstrap`, { headers: { cookie: victim.cookie } });
+    assert.strictEqual(dead.status, 401, 'la cookie viva deja de servir al bloquear');
+
+    const relog = await fetch(`${base}/api/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: NAME, password: CLAVE, hwid: 'e'.repeat(64) }),
+    });
+    assert.strictEqual(relog.status, 403);
+    const relogBody = await relog.json();
+    assert.strictEqual(relogBody.code, 'blocked');
+    assert.match(relogBody.error, /comparte la cuenta/, 'el motivo llega en el error de login');
+
+    const listed = await (await fetch(`${base}/api/admin/accounts`, { headers: { cookie } })).json();
+    const blocked = listed.accounts.find((entry) => entry.username === NAME);
+    assert.strictEqual(blocked.status, 'blocked');
+    assert.strictEqual(blocked.block_reason, 'comparte la cuenta');
+    assert.ok(listed.totals.blocked >= 1);
+
+    const unblock = await fetch(`${base}/api/admin/accounts/${NAME}/status`, {
+      method: 'POST', headers: json(cookie), body: JSON.stringify({ status: 'active' }),
+    });
+    assert.strictEqual(unblock.status, 200);
+
+    const back = await login(base, NAME, CLAVE, 'e'.repeat(64));
+    assert.strictEqual(back.response.status, 200, 'desbloqueada, vuelve a entrar');
+    const clean = await (await fetch(`${base}/api/admin/accounts`, { headers: { cookie } })).json();
+    assert.strictEqual(clean.accounts.find((entry) => entry.username === NAME).block_reason, null);
+  } finally {
+    server.close();
+  }
+});
+
+test('admin: contraseña nueva, rol y desvinculado de equipo', async () => {
+  const { server, base } = await listen();
+  const NAME = 'resetme';
+  const OLD = 'clave-vieja-de-reset';
+
+  try {
+    const victim = await registerUser(base, { username: NAME, password: OLD, hwid: 'f'.repeat(64) });
+    const { cookie } = await login(base, OWNER, 'test-password', HWID_A);
+
+    const short = await fetch(`${base}/api/admin/accounts/${NAME}/password`, {
+      method: 'POST', headers: json(cookie), body: JSON.stringify({ password: 'corta' }),
+    });
+    assert.strictEqual(short.status, 400, 'respeta el mínimo de caracteres');
+
+    const legacy = await fetch(`${base}/api/admin/accounts/${OWNER}/password`, {
+      method: 'POST', headers: json(cookie), body: JSON.stringify({ password: 'clave-nueva-1234' }),
+    });
+    assert.strictEqual(legacy.status, 409, 'la cuenta del deploy se cambia en el deploy');
+
+    const reset = await fetch(`${base}/api/admin/accounts/${NAME}/password`, {
+      method: 'POST', headers: json(cookie), body: JSON.stringify({ password: 'clave-nueva-del-admin' }),
+    });
+    assert.strictEqual(reset.status, 200);
+
+    const dead = await fetch(`${base}/api/summary`, { headers: { cookie: victim.cookie } });
+    assert.strictEqual(dead.status, 401, 'resetear la contraseña cierra las sesiones abiertas');
+
+    const oldKey = await login(base, NAME, OLD, 'f'.repeat(64));
+    assert.strictEqual(oldKey.response.status, 401, 'la contraseña vieja ya no vale');
+
+    const newKey = await login(base, NAME, 'clave-nueva-del-admin', 'f'.repeat(64));
+    assert.strictEqual(newKey.response.status, 200, 'la nueva contraseña entra');
+
+    const promote = await fetch(`${base}/api/admin/accounts/${NAME}/role`, {
+      method: 'POST', headers: json(cookie), body: JSON.stringify({ role: 'admin' }),
+    });
+    assert.strictEqual(promote.status, 200);
+    const promoted = await (await fetch(`${base}/api/admin/accounts`, { headers: { cookie } })).json();
+    assert.strictEqual(promoted.accounts.find((e) => e.username === NAME).role, 'admin');
+    assert.ok(promoted.totals.admins >= 2);
+
+    const badRole = await fetch(`${base}/api/admin/accounts/${NAME}/role`, {
+      method: 'POST', headers: json(cookie), body: JSON.stringify({ role: 'root' }),
+    });
+    assert.strictEqual(badRole.status, 400);
+
+    const demote = await fetch(`${base}/api/admin/accounts/${NAME}/role`, {
+      method: 'POST', headers: json(cookie), body: JSON.stringify({ role: 'user' }),
+    });
+    assert.strictEqual(demote.status, 200);
+
+    const lastAdmin = await fetch(`${base}/api/admin/accounts/${OWNER}/role`, {
+      method: 'POST', headers: json(cookie), body: JSON.stringify({ role: 'user' }),
+    });
+    assert.strictEqual(lastAdmin.status, 409, 'no puede quedar el panel sin admin');
+
+    const unlink = await fetch(`${base}/api/admin/accounts/${NAME}/unlink`, { method: 'POST', headers: { cookie } });
+    assert.strictEqual(unlink.status, 200);
+    const afterUnlink = await (await fetch(`${base}/api/admin/accounts`, { headers: { cookie } })).json();
+    assert.strictEqual(afterUnlink.accounts.find((e) => e.username === NAME).hwid_linked, false);
+
+    const otherDevice = await login(base, NAME, 'clave-nueva-del-admin', 'a'.repeat(64));
+    assert.strictEqual(otherDevice.response.status, 200, 'desvinculada, entra desde cualquier equipo');
+  } finally {
+    server.close();
+  }
+});
+
+test('admin: borrar una cuenta se lleva sus objetivos y sus eventos', async () => {
+  const { server, base } = await listen();
+  const NAME = 'borrada';
+
+  try {
+    const victim = await registerUser(base, { username: NAME, password: 'clave-de-borrado-1', hwid: '1'.repeat(64) });
+    await targets.add(NAME, '888888888888888888', 'señuelo', null);
+    store.get('events').push({
+      owner: NAME,
+      event_type: 'message',
+      user_id: '888888888888888888',
+      username: 'señuelo',
+      content: 'contenido de la cuenta a borrar',
+      created_at: new Date().toISOString(),
+      metadata: {},
+      id: nextId++,
+    });
+    bot.__setClient(NAME, fakeClient);
+    assert.ok(bot.getClient(NAME), 'la cuenta tiene gateway antes del borrado');
+
+    const { cookie } = await login(base, OWNER, 'test-password', HWID_A);
+
+    const self = await fetch(`${base}/api/admin/accounts/${OWNER}`, { method: 'DELETE', headers: { cookie } });
+    assert.strictEqual(self.status, 409, 'el admin no se borra a sí mismo');
+
+    const lastAdmin = await fetch(`${base}/api/admin/accounts/noexiste`, { method: 'DELETE', headers: { cookie } });
+    assert.strictEqual(lastAdmin.status, 404);
+
+    const del = await fetch(`${base}/api/admin/accounts/${NAME}`, { method: 'DELETE', headers: { cookie } });
+    assert.strictEqual(del.status, 200);
+    assert.strictEqual((await del.json()).removed, NAME);
+
+    const list = await (await fetch(`${base}/api/admin/accounts`, { headers: { cookie } })).json();
+    assert.ok(!list.accounts.some((entry) => entry.username === NAME), 'la cuenta desaparece de la gestión');
+    assert.strictEqual(store.get('targets').filter((row) => row.owner === NAME).length, 0, 'sus objetivos se borran');
+    assert.strictEqual(store.get('events').filter((row) => row.owner === NAME).length, 0, 'sus eventos se borran');
+    assert.strictEqual(bot.getClient(NAME), null, 'el gateway de esa cuenta se libera');
+    assert.strictEqual(await accounts.getRecord(NAME), null, 'el registro ya no existe');
+
+    const again = await fetch(`${base}/api/admin/accounts/${NAME}`, { method: 'DELETE', headers: { cookie } });
+    assert.strictEqual(again.status, 404, 'borrar dos veces avisa que no existe');
+
+    const deadSession = await fetch(`${base}/api/bootstrap`, { headers: { cookie: victim.cookie } });
+    assert.strictEqual(deadSession.status, 401);
+  } finally {
+    server.close();
+  }
+});
+
 /* ---------------------------------------------------------------- runner -- */
 
 (async () => {

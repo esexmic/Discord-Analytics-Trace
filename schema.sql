@@ -1,11 +1,12 @@
--- Trace by XYB — schema v2 (una cuenta por persona)
+-- Trace by XYB — schema v3 (una cuenta por persona + gestión desde el rol admin)
 --
 -- Ejecutar completo en Supabase > SQL Editor > New query > Run.
--- Es idempotente y se puede correr sobre una base v1 sin borrar datos:
+-- Es idempotente y se puede correr sobre una base v1 o v2 sin borrar datos:
 -- lo que ya existía se asigna a la cuenta más vieja.
 --
 -- Cada fila de targets/events pertenece a un `owner` (el usuario del panel).
 -- Cada cuenta guarda su propio token de Discord y la identidad vinculada.
+-- Las columnas de uso (ip, user_agent, contadores, status) las lee el admin.
 
 create extension if not exists pgcrypto;
 
@@ -29,7 +30,19 @@ alter table public.accounts add column if not exists discord_user_id  text;
 alter table public.accounts add column if not exists discord_username text;
 alter table public.accounts add column if not exists discord_avatar   text;
 
-create index if not exists accounts_hwid_idx on public.accounts (hwid_hash);
+-- v3: control y visibilidad para el rol admin.
+alter table public.accounts add column if not exists status       text not null default 'active';
+alter table public.accounts add column if not exists block_reason text;
+alter table public.accounts add column if not exists login_count  integer not null default 0;
+alter table public.accounts add column if not exists boot_count   integer not null default 0;
+alter table public.accounts add column if not exists last_seen_at timestamptz;
+alter table public.accounts add column if not exists user_agent   text;
+
+-- Las cuentas creadas antes de v3 tienen su último login pero contador en 0.
+update public.accounts set login_count = 1 where login_count = 0 and last_login_at is not null;
+
+create index if not exists accounts_hwid_idx  on public.accounts (hwid_hash);
+create index if not exists accounts_status_idx on public.accounts (status, created_at desc);
 
 -- ------------------------------------------------------------------- targets
 
@@ -113,6 +126,28 @@ $$;
 
 revoke all on function public.event_stats(text, timestamptz) from public, anon, authenticated;
 grant execute on function public.event_stats(text, timestamptz) to service_role;
+
+-- Uso aggregate por cuenta para la gestión del admin: cuántos eventos generó
+-- en la ventana y cuántos objetivos tiene, todo en una sola consulta. Sin esto
+-- el admin tendría que pedir un count por cuenta (N queries en cada apertura).
+create or replace function public.admin_usage(p_since timestamptz)
+returns table (owner text, total bigint, last_event_at timestamptz, targets bigint)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select e.owner,
+         count(*)::bigint as total,
+         max(e.created_at) as last_event_at,
+         (select count(*)::bigint from public.targets t where t.owner = e.owner) as targets
+    from public.events e
+   where e.created_at >= p_since
+   group by e.owner;
+$$;
+
+revoke all on function public.admin_usage(timestamptz) from public, anon, authenticated;
+grant execute on function public.admin_usage(timestamptz) to service_role;
 
 -- Retención: borra eventos viejos. Ejecutar a mano, con pg_cron, o desde el SQL
 -- editor de Supabase una vez por semana:

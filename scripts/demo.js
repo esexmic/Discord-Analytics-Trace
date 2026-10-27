@@ -36,6 +36,8 @@ db.insertEvents = async (rows) => {
 db.__setClient(createFakeSupabase(store));
 
 const bot = require('../src/bot');
+const targets = require('../src/targets');
+const accounts = require('../src/accounts');
 const { startServer } = require('../src/server');
 
 const OWNER = 'admin';
@@ -298,11 +300,59 @@ store.get('targets').push(
 
 for (const row of seed) row.owner = OWNER;
 
-db.insertEvents(seed).then(() => {
+const DEMO_HWID = 'd'.repeat(64);
+const DEMO_HWID_B = 'e'.repeat(64);
+
+/** Dos cuentas más, para ver la gestión del admin con datos reales de uso. */
+async function seedAccounts() {
+  await accounts.register({
+    username: 'sofi',
+    password: 'demo-sofi-123',
+    hwid: DEMO_HWID,
+    hwidLabel: 'Windows · Chrome',
+    ip: '190.102.33.7',
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36',
+  });
+  await accounts.saveDiscord('sofi', {
+    token: 'sofi.demo.token.secreto.sofi.demo.token',
+    userId: SOFI,
+    username: 'sofi',
+    avatar: null,
+  });
+  await accounts.register({
+    username: 'tomi',
+    password: 'demo-tomi-123',
+    hwid: DEMO_HWID_B,
+    hwidLabel: 'Android · Chrome',
+    ip: '181.43.9.212',
+    userAgent: 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/125.0 Mobile Safari/537.36',
+  });
+  await accounts.setStatus('tomi', 'blocked', 'compartió la cuenta con dos más');
+
+  await targets.add('sofi', VALEN, 'Valen', null);
+  await targets.add('sofi', TOMI, 'Tomi', 'ex amigo');
+
+  store.get('events').push(
+    {
+      owner: 'sofi', event_type: 'message', user_id: VALEN, username: 'Valen',
+      guild_id: guildA.id, guild_name: guildA.name, channel_id: '700000000000000001',
+      channel_name: 'general', content: 'che, viste lo que mandó tomi',
+      metadata: { attachments: 0, mentions: 0, reply_to: null }, created_at: ago(18), id: nextId++,
+    },
+    {
+      owner: 'sofi', event_type: 'presence', user_id: VALEN, username: 'Valen',
+      guild_id: guildA.id, guild_name: guildA.name,
+      metadata: { from: 'idle', to: 'online', devices: ['desktop'], activities: [] }, created_at: ago(52), id: nextId++,
+    }
+  );
+}
+
+db.insertEvents(seed).then(() => seedAccounts()).then(() => {
   const port = Number(process.env.PORT);
   startServer(port);
-  console.log(`[demo] datos falsos cargados: ${seed.length} eventos, 3 objetivos`);
+  console.log(`[demo] datos falsos cargados: ${seed.length} eventos, 3 objetivos, 2 cuentas de gestión`);
   console.log(`[demo] http://localhost:${port}  ·  usuario: admin  ·  contraseña: demo`);
+  console.log('[demo] cuentas de ejemplo: sofi / demo-sofi-123 · tomi (bloqueada) / demo-tomi-123');
 });
 
 /* Un evento nuevo cada 30s para ver el feed en vivo (SSE) funcionando. */

@@ -88,6 +88,7 @@
 
     <section class="side__sec side__sec--foot">
       <button id="open-settings" class="rowbtn" type="button">Cuenta y token</button>
+      <button id="open-admin" class="rowbtn rowbtn--admin hidden" type="button">Gestionar cuentas</button>
       <button id="logout" class="rowbtn rowbtn--muted" type="button">Cerrar sesión</button>
     </section>
   </aside>
@@ -206,6 +207,23 @@
     <input id="picker-search" class="small" type="text" placeholder="buscar miembro por nombre o ID">
     <div id="picker-list" class="members"></div>
     <div class="error" id="picker-error"></div>
+  </div>
+</dialog>
+
+<!-- admin -->
+<dialog id="admin" class="modal modal--wide">
+  <div class="modal__head">
+    <div class="modal__title">Gestión de cuentas</div>
+    <div class="modal__tools">
+      <button id="admin-refresh" class="btn btn--ghost btn--mini" type="button">Actualizar</button>
+      <button class="modal__close" data-close type="button" aria-label="Cerrar">✕</button>
+    </div>
+  </div>
+  <div class="modal__body">
+    <div id="admin-summary" class="acctsum"></div>
+    <div id="admin-note" class="acctnote hidden"></div>
+    <div id="admin-list" class="accts"></div>
+    <div class="error" id="admin-error"></div>
   </div>
 </dialog>
 

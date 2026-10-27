@@ -201,6 +201,11 @@ function reset() {
   states.clear();
 }
 
+/** Tira la cache de una cuenta (la usa el admin al borrarla). */
+function forget(owner) {
+  states.delete(String(owner || '').trim().toLowerCase());
+}
+
 module.exports = {
   isTarget,
   add,
@@ -210,4 +215,5 @@ module.exports = {
   touch,
   status,
   reset,
+  forget,
 };

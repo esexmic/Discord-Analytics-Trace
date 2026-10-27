@@ -155,6 +155,21 @@ function ownerOf(req) {
   return req.auth.account.username;
 }
 
+function requireAdmin(req, res, next) {
+  if (req.auth?.account?.role !== 'admin') {
+    return res.status(403).json({ error: 'Solo el admin puede gestionar cuentas', code: 'forbidden' });
+  }
+  return next();
+}
+
+/** Ip + navegador que se guardan en la cuenta para la vista del admin. */
+function clientInfo(req) {
+  return {
+    ip: req.ip || null,
+    userAgent: req.headers['user-agent'] ? String(req.headers['user-agent']).slice(0, 240) : null,
+  };
+}
+
 const attempts = new Map();
 const MAX_ATTEMPTS = 12;
 const ATTEMPT_WINDOW_MS = 60_000;
@@ -206,7 +221,7 @@ app.post('/api/login', async (req, res) => {
       password: req.body?.password,
       hwid: req.body?.hwid,
       hwidLabel: req.body?.hwid_label,
-      ip,
+      ...clientInfo(req),
     });
     startSession(req, res, account);
     bot.kick(account.username);
@@ -229,7 +244,7 @@ app.post('/api/register', async (req, res) => {
       password: req.body?.password,
       hwid: req.body?.hwid,
       hwidLabel: req.body?.hwid_label,
-      ip,
+      ...clientInfo(req),
     });
     startSession(req, res, account);
     res.json(loginPayload(account));
@@ -250,7 +265,7 @@ app.post('/api/recover-device', async (req, res) => {
       password: req.body?.password,
       hwid: req.body?.hwid,
       hwidLabel: req.body?.hwid_label,
-      ip,
+      ...clientInfo(req),
     });
     startSession(req, res, account);
     bot.kick(account.username);
@@ -456,7 +471,7 @@ function sendError(res, error) {
   if (code === 'bad_credentials' || code === 'unauthorized') {
     return res.status(401).json({ error: error.message, code });
   }
-  if (code === 'hwid_mismatch') return res.status(403).json({ error: error.message, code });
+  if (code === 'hwid_mismatch' || code === 'blocked') return res.status(403).json({ error: error.message, code });
   if (code === 'exists' || code === 'busy') return res.status(409).json({ error: error.message, code });
   if (code === 'not_found') return res.status(404).json({ error: error.message, code });
   if (code === 'invalid' || code === 'invalid_token') return res.status(400).json({ error: error.message, code });
@@ -485,6 +500,9 @@ function snowflake(value) {
 app.get('/api/bootstrap', requireAuth, async (req, res) => {
   const owner = ownerOf(req);
   bot.kick(owner);
+  // Cuenta como "usó la página". Se resuelve solo (throttle adentro) para no
+  // escribir en la base ni frenar el arranque si la DB está caída.
+  accounts.touchUsage(owner, clientInfo(req)).catch(() => {});
 
   const [targetRows, summary, events, guilds] = await Promise.all([
     targets.list(owner).catch((error) => {
@@ -825,6 +843,232 @@ app.get('/api/stream', requireAuth, (req, res) => {
     clearInterval(ping);
     streamClients.delete(res);
   });
+});
+
+/* ------------------------------------------------------------ admin ------- */
+
+const ADMIN_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Corta el SSE de una cuenta (bloqueo o borrado): que no vea eventos más. */
+function dropStreams(owner) {
+  for (const [res, clientOwner] of streamClients) {
+    if (clientOwner !== owner) continue;
+    try {
+      res.end();
+    } catch {
+      // respuesta ya cerrada
+    }
+    streamClients.delete(res);
+  }
+}
+
+/**
+ * Eventos y objetivos por cuenta en una sola consulta (RPC `admin_usage` del
+ * schema v3). Si el RPC no existe todavía, agrega en memoria sobre un techo de
+ * 10k filas y marca el resultado como aproximado.
+ */
+async function adminUsage(since) {
+  if (!db.isConfigured() || !db.isHealthy()) return { usage: new Map(), approximate: true };
+  const client = db.getClient();
+
+  if (typeof client.rpc === 'function') {
+    const { data, error } = await client.rpc('admin_usage', { p_since: since });
+    if (!error) {
+      const usage = new Map();
+      for (const row of data || []) {
+        usage.set(String(row.owner), {
+          events: Number(row.total) || 0,
+          targets: Number(row.targets) || 0,
+          last_event_at: row.last_event_at || null,
+        });
+      }
+      return { usage, approximate: false };
+    }
+    if (!/function|schema cache|PGRST202|42883/i.test(String(error.message || ''))) {
+      throw new Error(error.message);
+    }
+  }
+
+  const [events, targets] = await Promise.all([
+    client.from('events').select('owner, created_at').gte('created_at', since).limit(10000),
+    client.from('targets').select('owner').limit(10000),
+  ]);
+  if (events.error || targets.error) {
+    throw new Error(events.error?.message || targets.error?.message);
+  }
+
+  const usage = new Map();
+  const bucket = (owner) => {
+    const key = String(owner);
+    if (!usage.has(key)) usage.set(key, { events: 0, targets: 0, last_event_at: null });
+    return usage.get(key);
+  };
+  for (const row of events.data || []) {
+    const entry = bucket(row.owner);
+    entry.events += 1;
+    if (!entry.last_event_at || String(row.created_at) > entry.last_event_at) {
+      entry.last_event_at = row.created_at;
+    }
+  }
+  for (const row of targets.data || []) bucket(row.owner).targets += 1;
+
+  return { usage, approximate: true };
+}
+
+app.get('/api/admin/accounts', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const since = new Date(Date.now() - ADMIN_WINDOW_MS).toISOString();
+    const [rows, usageInfo] = await Promise.all([
+      accounts.listAdmin(),
+      adminUsage(since),
+    ]);
+
+    const legacy = settings.accountView();
+    const legacyName = legacy.source !== 'none' && legacy.username ? String(legacy.username) : null;
+    const known = new Set(rows.map((row) => String(row.username)));
+    if (legacyName && !known.has(legacyName)) {
+      rows.push({
+        username: legacyName,
+        role: 'admin',
+        status: 'active',
+        login_count: 0,
+        boot_count: 0,
+      });
+    }
+
+    const me = ownerOf(req);
+    const admins = rows.filter((row) => (row.role || 'user') === 'admin').length;
+
+    res.json({
+      accounts: rows.map((row) => ({
+        ...accounts.publicView(row),
+        legacy: legacyName ? String(row.username) === legacyName : Boolean(row.legacy),
+        self: String(row.username) === me,
+        events_7d: usageInfo.usage.get(String(row.username))?.events ?? 0,
+        targets: usageInfo.usage.get(String(row.username))?.targets ?? 0,
+        last_event_at: usageInfo.usage.get(String(row.username))?.last_event_at ?? null,
+      })),
+      totals: {
+        accounts: rows.length,
+        admins,
+        blocked: rows.filter((row) => (row.status || 'active') === 'blocked').length,
+        withToken: rows.filter((row) => row.discord_token).length,
+      },
+      window: '7d',
+      approximate: usageInfo.approximate,
+      db: dbState(),
+    });
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
+app.post('/api/admin/accounts/:username/status', requireAuth, requireAdmin, async (req, res) => {
+  const target = String(req.params.username || '').toLowerCase();
+  try {
+    const status = String(req.body?.status || '');
+    if (!['active', 'blocked'].includes(status)) {
+      return res.status(400).json({ error: 'Estado inválido', code: 'invalid' });
+    }
+    if (status === 'blocked' && target === ownerOf(req)) {
+      return res.status(409).json({ error: 'No podés bloquear tu propia cuenta' });
+    }
+
+    const account = await accounts.setStatus(target, status, req.body?.reason);
+    invalidateSummary(target);
+    if (status === 'blocked') dropStreams(target);
+    res.json({ ok: true, account });
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
+app.post('/api/admin/accounts/:username/role', requireAuth, requireAdmin, async (req, res) => {
+  const target = String(req.params.username || '').toLowerCase();
+  try {
+    const role = String(req.body?.role || '');
+    if (!['admin', 'user'].includes(role)) {
+      return res.status(400).json({ error: 'Rol inválido', code: 'invalid' });
+    }
+
+    const rows = await accounts.listAdmin();
+    const admins = rows.filter((row) => (row.role || 'user') === 'admin');
+    if (role === 'user' && admins.length <= 1 && admins.some((row) => row.username === target)) {
+      return res.status(409).json({ error: 'Tiene que quedar al menos un admin' });
+    }
+
+    res.json({ ok: true, account: await accounts.setRole(target, role) });
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
+app.post('/api/admin/accounts/:username/password', requireAuth, requireAdmin, async (req, res) => {
+  const target = String(req.params.username || '').toLowerCase();
+  try {
+    const legacy = settings.accountView();
+    if (legacy.source !== 'none' && legacy.username === target) {
+      return res.status(409).json({
+        error: 'La cuenta del deploy cambia de contraseña en las variables del deploy, no acá',
+      });
+    }
+    const account = await accounts.adminSetPassword(target, req.body?.password);
+    invalidateSummary(target);
+    dropStreams(target);
+    res.json({ ok: true, account });
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
+app.post('/api/admin/accounts/:username/unlink', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const account = await accounts.adminUnlinkHwid(String(req.params.username || '').toLowerCase());
+    res.json({ ok: true, account });
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
+/**
+ * Borra la cuenta y todo lo suyo: gateway, objetivos y eventos. No hay
+ * deshacer, así que el panel pide confirmación explícita.
+ */
+app.delete('/api/admin/accounts/:username', requireAuth, requireAdmin, async (req, res) => {
+  const target = String(req.params.username || '').toLowerCase();
+  try {
+    if (target === ownerOf(req)) {
+      return res.status(409).json({ error: 'No podés borrar tu propia cuenta' });
+    }
+
+    const rows = await accounts.listAdmin();
+    const admins = rows.filter((row) => (row.role || 'user') === 'admin');
+    if (admins.length <= 1 && admins.some((row) => row.username === target)) {
+      return res.status(409).json({ error: 'No podés borrar el único admin' });
+    }
+
+    await bot.forget(target);
+    if (db.isConfigured()) {
+      const client = db.getClient();
+      const [targetsOut, eventsOut] = await Promise.all([
+        client.from('targets').delete().eq('owner', target),
+        client.from('events').delete().eq('owner', target),
+      ]);
+      const failure = targetsOut.error || eventsOut.error;
+      if (failure) {
+        db.noteFailure(failure);
+        return res.status(503).json({ error: `La base no pudo borrar sus datos: ${failure.message}`, code: 'db_unavailable' });
+      }
+    }
+    await accounts.removeAccount(target);
+
+    targets.forget(target);
+    invalidateSummary(target);
+    dropStreams(target);
+    res.json({ ok: true, removed: target });
+  } catch (error) {
+    sendError(res, error);
+  }
 });
 
 app.use('/api', (req, res) => {
