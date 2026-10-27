@@ -154,7 +154,7 @@
 <!-- settings -->
 <dialog id="settings" class="modal">
   <div class="modal__head">
-    <div class="modal__title">Cuenta y token</div>
+    <div class="modal__title">Cuenta, token y webhook</div>
     <button class="modal__close" data-close type="button" aria-label="Cerrar">✕</button>
   </div>
   <div class="modal__body settings">
@@ -167,6 +167,18 @@
         <button class="btn btn--danger btn--mini" id="set-token-clear" type="button">Quitar</button>
       </div>
       <div class="cfg__msg" id="set-token-msg"></div>
+    </div>
+
+    <div class="cfg">
+      <div class="cfg__title">Webhook de actividad</div>
+      <div class="cfg__desc" id="set-wh-desc">Sin configurar. Los eventos solo se ven en el panel.</div>
+      <div class="cfg__row">
+        <input id="set-wh-url" class="small small--url" type="url" placeholder="https://discord.com/api/webhooks/…" autocomplete="off" spellcheck="false" inputmode="url">
+        <button class="btn btn--mini" id="set-wh-save" type="button">Guardar</button>
+        <button class="btn btn--ghost btn--mini" id="set-wh-test" type="button">Probar</button>
+        <button class="btn btn--danger btn--mini" id="set-wh-clear" type="button">Quitar</button>
+      </div>
+      <div class="cfg__msg" id="set-wh-msg"></div>
     </div>
 
     <div class="cfg">

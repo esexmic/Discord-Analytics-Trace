@@ -28,6 +28,9 @@ module.exports = {
   trackAll: flag('TRACK_ALL'),
   seedTargets: list(process.env.TARGETS),
   alertWebhook: String(process.env.ALERT_WEBHOOK || '').trim(),
+  // Origen público del panel. El webhook de actividad lo usa para el avatar del
+  // log (/logo.jpg); sin esta variable se deduce del host con el que se entra.
+  publicUrl: String(process.env.PUBLIC_URL || '').trim().replace(/\/+$/, ''),
   selfPresence: String(process.env.SELF_PRESENCE || '').trim(),
   nodeEnv: process.env.NODE_ENV || 'development',
   isProduction: process.env.NODE_ENV === 'production',

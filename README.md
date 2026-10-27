@@ -38,6 +38,7 @@ src/db.js               cliente Supabase perezoso + probe + insert batch
 src/targets.js          cache de objetivos por owner (refresh cada 20s, backoff si falla)
 src/queue.js            buffer de escritura (40 eventos / 700ms)
 src/bot.js              un gateway por cuenta: presencia, mensajes, edits, voz, connect/disconnect
+src/webhooks.js         log de actividad por cuenta en Discord (embeds "Xyb Trace")
 src/server.js           API + auth por cookie + bootstrap + SSE
 src/index.js            arranque + shutdown limpio
 public/index.html       dashboard (vanilla, sin build)
@@ -120,6 +121,31 @@ Un detalle que importa: la selección viaja como lista de ids, pero el server re
 
 **No hace falta volver a correr `schema.sql`** para esto: la v3 que ya tenés trae `events.id` (`bigserial`) y los índices `events_owner_created_idx` / `events_owner_type_idx`, que son lo que usan estas consultas.
 
+### Webhook de actividad (log en Discord)
+
+**Ajustes → Webhook de actividad**: cada cuenta pega la URL de un webhook propio (*Crear webhook* en el canal → *Copiar URL*) y guarda. Desde ahí, **el mismo registro que se ve en el panel sale al canal de Discord**, armado como embeds bajo el nombre **Xyb Trace** y con la foto del logo.
+
+Cómo sale cada línea:
+
+| | |
+|---|---|
+| **Remitente** | `Xyb Trace`, con el logo como avatar |
+| **Título** | un ícono + la acción + **el nombre del objetivo de ese evento** (`✉ Mensaje · Valen`). Dos objetivos seguidos = dos líneas con dos nombres distintos |
+| **Cuerpo** | el detalle legible: el texto entre comillas de bloque, antes/ahora en una edición, canal y cuánto estuvo en voz, estado anterior → nuevo con dispositivo y actividad, cambios de perfil |
+| **Campos** | Servidor · Canal · `ID` del objetivo |
+| **Link** | solo cuando se puede abrir: mensaje → `discord.com/channels/{servidor}/{canal}/{mensaje}` (clic en el título salta al mensaje), voz → `discord.com/channels/{servidor}/{canal}`. **Presencia y perfil no tienen canal: salen sin link.** No se inventa ninguno |
+| **Menciones** | `allowed_mentions: { parse: [] }` — el log nunca pinguea a nadie |
+
+Detalles que convienen saber:
+
+- **Sale del mismo lote que el SSE**, así que lo que se ve en la página es lo que llega al canal. Se agrupa hasta **10 embeds por mensaje** (Discord ratea los webhooks rápido) con una ventana de 1,2 s.
+- **La URL es un secreto.** En la base vive en `accounts.webhook_url` y el panel solo muestra la vista enmascarada (`…/webhooks/1234567890123456789/supe…`); ningún response de la API la devuelve completa. El botón **Probar** manda un evento de muestra sin tocar el feed real.
+- **Un webhook caído no frena nada.** Si Discord responde 400/401/404 (canal borrado, webhook revocado) la cuenta entra en **cooldown de 5 minutos**, se descarta lo acumulado y el bot sigue registrando y escribiendo a la base; se ve en el log del server como `webhook rechazado, se pausa 5 min`. Un error de red se reintenta a los 60 s. El buffer por cuenta tiene techo de 60 eventos: si se llena, se tira lo más viejo con un aviso, nunca se bloquea la escritura.
+- **El avatar necesita un origen público.** `/logo.jpg` se resuelve con `PUBLIC_URL` si está definida; si no, el server aprende el origen de la primera request autenticada. Detrás de `localhost` o de un host que Discord no puede alcanzar, el embed sale igual pero sin foto.
+- **Se suelta al borrar o bloquear la cuenta** y al quitar el webhook se descartan los eventos en espera de esa cuenta, para no mandar nada después de apagarlo.
+
+`ALERT_WEBHOOK` (el de entorno) sigue siendo otra cosa: avisos en texto plano de conexión/voz de la cuenta del deploy. Este log es **por cuenta** y son embeds.
+
 ### Aislar el deploy
 
 La web se cierra por registro, no por key: cualquiera que tenga la URL puede crear cuenta, pero cada cuenta solo ve sus propios objetivos y eventos. Quien administra bloquea o borra desde el panel (**Gestionar cuentas**), sin tocar Supabase. Si además querés cerrar la puerta por red, hacelo afuera del app (Railway Private Networking o Basic Auth en un proxy). El server ya no tiene API keys ni key de registro.
@@ -130,12 +156,12 @@ La web se cierra por registro, no por key: cualquiera que tenga la URL puede cre
 npm run demo
 ```
 
-Abre `http://localhost:3311`, usuario `admin`, contraseña `demo`. Carga 3 objetivos de mentira, eventos de todos los tipos y un mensaje nuevo cada 30s para ver el feed en vivo. También crea dos cuentas para probar la gestión del admin: `sofi` (con token de mentira y actividad) y `tomi` (bloqueada, con motivo). No toca Supabase ni Discord.
+Abre `http://localhost:3311`, usuario `admin`, contraseña `demo`. Carga 3 objetivos de mentira, eventos de todos los tipos y un mensaje nuevo cada 30s para ver el feed en vivo. También crea dos cuentas para probar la gestión del admin: `sofi` (con token de mentira y actividad) y `tomi` (bloqueada, con motivo). No toca Supabase ni Discord: si le guardás un webhook en Ajustes, el mensaje **se imprime en la consola** con la firma `Xyb Trace` y su link, no sale de la máquina.
 
 ## 1. Supabase
 
 1. Crear proyecto en https://supabase.com (free).
-2. **SQL Editor → New query** → pegar **todo** `schema.sql` → **Run**. El archivo es idempotente: crea lo que falta y hace backfill de las columnas `owner` sobre datos existentes, así que se puede volver a correr sobre una base vieja. **Si ya venías con la v2, volvé a correrlo**: la v3 agrega `status`, `block_reason`, `login_count`, `boot_count`, `last_seen_at`, `user_agent` y la función `admin_usage`, que necesita el panel de gestión. Después de la v3 no hay nada más que correr: el borrado de historial por cuenta trabaja con `events.id` y los índices por `owner` que ya están en ese archivo.
+2. **SQL Editor → New query** → pegar **todo** `schema.sql` → **Run**. El archivo es idempotente: crea lo que falta y hace backfill de las columnas `owner` sobre datos existentes, así que se puede volver a correr sobre una base vieja. **Esta versión pide correrlo otra vez**: la v4 agrega `accounts.webhook_url`, la columna donde queda la URL del webhook de actividad. Sin eso, **Ajustes → Webhook de actividad** no guarda y el panel lo avisa.
 3. **Project Settings → API** → copiar en `.env`:
    - `Project URL` → `SUPABASE_URL`
    - `service_role` key (secret) → `SUPABASE_SERVICE_KEY`
@@ -144,7 +170,7 @@ La `service_role` bypassea RLS. No la pongas en el frontend ni en un repo públi
 
 Si el panel dice *"Falta correr schema.sql"*, faltó el paso 2.
 
-> **Venís de una versión anterior:** hay que volver a correr `schema.sql`. Las tablas ganaron la columna `owner` (targets y eventos), la cuenta guarda su token de Discord, existen los RPC `event_stats` y `admin_usage` y `accounts` ganó las columnas de gestión (`status`, `block_reason`, `login_count`, `boot_count`, `last_seen_at`, `user_agent`). Sin ese paso el panel muestra el error de schema en el banner superior en vez de quedar mudo; la gestión de cuentas funciona igual pero marca el uso como *aproximado*.
+> **Venís de una versión anterior:** hay que volver a correr `schema.sql`. Las tablas ganaron la columna `owner` (targets y eventos), la cuenta guarda su token de Discord, existen los RPC `event_stats` y `admin_usage`, `accounts` ganó las columnas de gestión (`status`, `block_reason`, `login_count`, `boot_count`, `last_seen_at`, `user_agent`) y ahora también `webhook_url`. Sin ese paso el panel muestra el error de schema en el banner superior en vez de quedar mudo; la gestión de cuentas funciona igual pero marca el uso como *aproximado* y el webhook de actividad no se guarda.
 
 ## 2. Token de Discord
 
@@ -223,6 +249,7 @@ Todas son opcionales: sin Supabase, el panel arranca igual y avisa que la base n
 | `TARGETS` | IDs extra separados por coma (se suman para todas las cuentas) |
 | `SELF_PRESENCE` | `online`, `idle`, `dnd` o `invisible` para el estado de la propia cuenta |
 | `ALERT_WEBHOOK` | webhook de Discord: avisa conexión/desconexión, voz y stream |
+| `PUBLIC_URL` | origen público del deploy (`https://…`). El log de actividad lo usa para el avatar del webhook; si falta, se deduce del host con el que se entra |
 | `DATA_DIR` | carpeta de `settings.json` y del fallback local (por defecto `./data`) |
 
 No existe `DISCORD_TOKEN` como variable del server: el token es de cada cuenta y se pega en el panel.
@@ -250,6 +277,10 @@ Todo bajo cookie de sesión salvo `/api/login`, `/api/register`, `/api/recover-d
 | GET | `/api/settings` | cuenta, estado del bot y estado de la DB |
 | PUT | `/api/settings/token` | `{ token }` → valida, guarda y reconecta el gateway de esa cuenta |
 | DELETE | `/api/settings/token` | olvidar el token y apagar el gateway de esa cuenta |
+| GET | `/api/webhook` | estado del webhook de actividad de la cuenta: `configured` y `preview` **enmascarado**, más el `avatar_url` que se está usando |
+| PUT | `/api/webhook` | `{ url }` → valida que sea un webhook de Discord real y lo guarda en `accounts.webhook_url`; responde solo la vista enmascarada |
+| DELETE | `/api/webhook` | quitar el webhook y descartar lo que estuviera en espera para esa cuenta |
+| POST | `/api/webhook/test` | `{ url? }` → manda un registro de muestra (con `url` prueba esa sin guardarla; sin `url` usa la guardada). 400 si no hay ninguna |
 | POST | `/api/bot/reconnect` | reconectar el gateway propio |
 | POST | `/api/bot/disconnect` | desconectar el gateway propio |
 | PUT | `/api/account` | `{ current, username?, password? }` → cambiar usuario/contraseña (sube `session_version`) |
@@ -286,5 +317,6 @@ No hay `/api/keys`, `/api/registration-key` ni `/api/settings/test`: se borraron
 - **Seguridad del dashboard**: cookie HMAC HttpOnly (+ `Secure` detrás de HTTPS) con `session_version` revocable y revocación en memoria al logout, contraseñas con scrypt + salt, HWID como sha256, rate limit de intentos fallidos (12/min por IP), `robots.txt` con `Disallow: /`, token de Discord y hashes fuera de toda respuesta de la API.
 - **Gestión sin secretos visibles**: el panel de admin arma su vista con `publicView()`, que nunca incluye `password_hash`, `password_salt`, `hwid_hash` ni el token completo (solo `token_preview`). Bloquear, resetear contraseña o desvincular suben `session_version`, así que la persona pierde las sesiones abiertas en el acto; borrar libera el gateway y limpia `targets`/`events` de esa cuenta. El `user_agent` se guarda recortado a 240 caracteres desde la request, no de un tracker.
 - **Historial con dueño**: la lectura y el borrado del historial arman la consulta con `.eq('owner', cuenta)` antes de cualquier filtro, inclusive en `scope: "ids"`. Un id de otra cuenta que se cole en la selección no se borra; y el `.select('id')` del borrado devuelve la fila exacta que salió, así el contador que ve el admin es real y no una estimación.
-- **Red resiliente**: `src/net.js` pone deadline de 12s y reintenta solo conexiones que todavía no se establecieron (no duplica escrituras). `targets.refresh` entra en backoff de 30s tras un fallo y el panel muestra el error real en vez de quedar mudo.
+- **Red resiliente**: `src/net.js` pone deadline de 12s y reintenta solo conexiones que todavía no se establecieron (no duplica escrituras). `targets.refresh` entra en backoff de 30s tras un fallo y el panel muestra el error real en vez de quedar mudo. El webhook de actividad usa el mismo `fetchWithRetry`, así un intento no queda colgado infinitamente.
+- **Webhook de actividad aislado del resto**: `src/webhooks.js` escucha el `emit('events')` de la cola, después de la escritura, con su propio buffer por owner. Un webhook lento o rechazado no le toca ni un byte a Supabase ni al feed: el flush tiene guarda de `busy`, el cooldown corta el reintento y lo acumulado se tira antes que bloquear. La URL cruda vive solo en la base; toda respuesta de la API y todo log salen por `maskWebhook()`.
 - **Webhook opcional**: `ALERT_WEBHOOK` manda un mensaje a un webhook de Discord en cada conexión/desconexión, entrada/salida de voz y stream.

@@ -1,7 +1,7 @@
--- Trace by XYB — schema v3 (una cuenta por persona + gestión desde el rol admin)
+-- Trace by XYB — schema v4 (webhook de actividad por cuenta)
 --
 -- Ejecutar completo en Supabase > SQL Editor > New query > Run.
--- Es idempotente y se puede correr sobre una base v1 o v2 sin borrar datos:
+-- Es idempotente y se puede correr sobre una base v1, v2 o v3 sin borrar datos:
 -- lo que ya existía se asigna a la cuenta más vieja.
 --
 -- Cada fila de targets/events pertenece a un `owner` (el usuario del panel).
@@ -37,6 +37,10 @@ alter table public.accounts add column if not exists login_count  integer not nu
 alter table public.accounts add column if not exists boot_count   integer not null default 0;
 alter table public.accounts add column if not exists last_seen_at timestamptz;
 alter table public.accounts add column if not exists user_agent   text;
+
+-- v4: webhook de actividad. La URL completa de un webhook lleva token, así que
+-- el panel solo muestra una vista enmascarada; la columna queda sólo en la base.
+alter table public.accounts add column if not exists webhook_url  text;
 
 -- Las cuentas creadas antes de v3 tienen su último login pero contador en 0.
 update public.accounts set login_count = 1 where login_count = 0 and last_login_at is not null;

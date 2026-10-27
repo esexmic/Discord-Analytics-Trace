@@ -276,3 +276,56 @@ NO CAMBIA
   índices por owner que ya trajo la v3.
 - El borrado siempre va filtrado por owner del lado del server; un id de otra
   cuenta en la selección no borra nada afuera.
+
+v1.7 — 26/10/2026 · WEBHOOK DE ACTIVIDAD POR CUENTA (firma Xyb Trace)
+=====================================================================
+
+DÓNDE VIVE
+- Dialog #settings: cambia el título a "Cuenta, token y webhook" y suma un
+  bloque .cfg entre el token y "Cambiar contraseña" (id #set-wh-*).
+- Lógica en public/app.js, sección "webhook" (después de set-token-clear).
+- Estilo nuevo: .cfg__row .small--url (mono, 11px, ocupa la fila entera).
+- Server: GET / PUT / DELETE /api/webhook y POST /api/webhook/test en
+  src/server.js, bloque "webhook log".
+- Despacho: src/webhooks.js, nuevo. La URL vive en accounts.webhook_url (v4).
+
+CÓMO SE VE EL PANEL
+- .cfg__desc dice el estado: "Sin configurar. Los eventos solo se ven en el
+  panel." o "Activo en https://discord.com/api/webhooks/…/supe…". Nunca se ve
+  el token completo: maskWebhook() recorta a los primeros 4 caracteres.
+- Tres botones en la fila: Guardar (PUT), Probar (POST test) y Quitar
+  (DELETE), con el mismo patrón de estado .cfg__msg is-ok / is-bad que el
+  token. Guardar y Quitar avisan con toast.
+- renderAccount() pinta el estado del webhook cada vez que cambia la cuenta,
+  así el bloque queda correcto sin recargar el dialog.
+
+CÓMO LLEGA AL CANAL
+- Remitente "Xyb Trace" con avatar /logo.jpg (el logo que ya es favicon).
+- Un embed por evento, hasta 10 por mensaje: título = ícono + acción + nombre
+  del objetivo de ESE evento ("✉ Mensaje · Valen"), descripción con el texto
+  en blockquote, antes/ahora en las ediciones, duración en voz y estado
+  anterior → nuevo con dispositivo; campos Servidor · Canal · `ID`.
+- Link real solo donde existe: mensaje → /channels/{guild}/{channel}/{id},
+  voz → /channels/{guild}/{channel}. Presencia y perfil salen sin link.
+- allowed_mentions { parse: [] }: el log nunca pinguea.
+- Colores por tipo: mensaje #a78bfa, edición/borrado #ffb4b6, voz #7fd3ff,
+  presencia #7ee2a0, perfil #cbb2ff.
+
+ESTADO Y FALLOS
+- Buffer por owner, ventana de 1.2s, techo de 60 eventos (lo más viejo se
+  tira con aviso, nunca se bloquea la escritura).
+- 400/401/404 de Discord → cooldown de 5 min y se descarta la espera; error de
+  red → reintento a los 60s. El bot y la base siguen igual durante todo eso.
+- Quitar el webhook, borrar o bloquear la cuenta llaman webhooks.forget(owner):
+  se borra la cache de la URL y lo que estaba en espera.
+- PUBLIC_URL fija el origen del avatar; si no está, se aprende de una request
+  autenticada. localhost = embed sin foto, el resto anda igual.
+
+NO CAMBIA
+- ALERT_WEBHOOK (entorno) sigue siendo el aviso en texto plano del deploy; es
+  otro camino, no se toca.
+- La página no gana borrado por evento: lo que se borra se borra desde
+  Gestionar cuentas → Historial (v1.6), por cuenta y filtrado por owner.
+
+REQUIERE
+- Correr schema.sql una vez: v4 agrega accounts.webhook_url.

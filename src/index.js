@@ -4,6 +4,7 @@ const { startServer } = require('./server');
 const bot = require('./bot');
 const queue = require('./queue');
 const db = require('./db');
+const webhooks = require('./webhooks');
 
 const server = startServer();
 let stopping = false;
@@ -45,6 +46,12 @@ async function shutdown(signal) {
     if (pending) console.warn(`[app] quedaron ${pending} eventos sin escribir`);
   } catch {
     // Ya estamos saliendo: no hay nada mejor que hacer.
+  }
+
+  try {
+    await webhooks.drain(2000);
+  } catch {
+    // el webhook se pierde; la escritura a la base ya intentó lo suyo
   }
 
   server.close(() => process.exit(0));

@@ -44,7 +44,12 @@ const bot = require('../src/bot');
 const queue = require('../src/queue');
 const targets = require('../src/targets');
 const accounts = require('../src/accounts');
+const webhooks = require('../src/webhooks');
 const { startServer } = require('../src/server');
+
+// El despacho real apuntaría a discord.com. Se corta acá y cada test de webhook
+// pone su propia captura; así ningún evento del suite sale hacia la red.
+webhooks.__setSend(async () => {});
 
 const OWNER = 'tester';
 const OTHER = 'vecina';
@@ -1078,6 +1083,257 @@ test('historial: la cuenta del deploy tiene historial aunque no tenga fila en ac
     await login(base, OWNER, 'test-password', HWID_A);
     assert.ok(await accounts.getRecord(OWNER), 'el login siguiente vuelve a provisionar la cuenta');
   } finally {
+    server.close();
+  }
+});
+
+/* ---------------------------------------------------------------- webhooks -- */
+
+const WH_TOKEN = 'super-secreto-del-webhook-abc123';
+const WH_URL = `https://discord.com/api/webhooks/1234567890123456789/${WH_TOKEN}`;
+
+async function putWebhook(base, cookie, url) {
+  const response = await fetch(`${base}/api/webhook`, {
+    method: 'PUT',
+    headers: json(cookie),
+    body: JSON.stringify({ url }),
+  });
+  return { status: response.status, body: await response.json() };
+}
+
+test('webhook: se guarda en el server, se prueba y se quita sin filtrar el token', async () => {
+  const { server, base } = await listen();
+  const sent = [];
+  webhooks.__reset();
+  webhooks.__setSend(async (url, payload) => {
+    sent.push({ url, payload });
+  });
+
+  try {
+    const { cookie } = await login(base, OWNER, 'test-password', HWID_A);
+
+    const rejected = await putWebhook(base, cookie, 'https://example.com/api/webhooks/123/abc');
+    assert.strictEqual(rejected.status, 400, 'solo se aceptan webhooks de Discord');
+
+    const saved = await putWebhook(base, cookie, WH_URL);
+    assert.strictEqual(saved.status, 200);
+    assert.strictEqual(saved.body.webhook.configured, true);
+    assert.ok(!JSON.stringify(saved.body).includes(WH_TOKEN), 'la respuesta no devuelve el token del webhook');
+    assert.ok(saved.body.webhook.preview.includes('discord.com/api/webhooks/1234567890123456789'));
+
+    const view = await (await fetch(`${base}/api/webhook`, { headers: { cookie } })).json();
+    assert.strictEqual(view.webhook.configured, true);
+    assert.ok(!JSON.stringify(view).includes(WH_TOKEN), 'el estado del webhook tampoco filtra el token');
+    assert.ok(view.avatar_url.endsWith('/logo.jpg'), 'el avatar del log es el logo del panel');
+
+    const boot = await (await fetch(`${base}/api/bootstrap`, { headers: { cookie } })).json();
+    assert.strictEqual(boot.account.webhook.configured, true, 'bootstrap informa el webhook sin ruta extra');
+
+    const probe = await fetch(`${base}/api/webhook/test`, {
+      method: 'POST',
+      headers: json(cookie),
+      body: JSON.stringify({}),
+    });
+    assert.strictEqual(probe.status, 200);
+    const probed = await probe.json();
+    assert.strictEqual(sent.length, 1, 'probar manda un mensaje');
+    assert.strictEqual(sent[0].url, WH_URL);
+    assert.strictEqual(sent[0].payload.username, 'Xyb Trace');
+    assert.ok(probed.sent.includes('objetivo de prueba'), 'la prueba describe lo que se mandó');
+
+    const removed = await fetch(`${base}/api/webhook`, { method: 'DELETE', headers: { cookie } });
+    assert.strictEqual(removed.status, 200);
+    assert.strictEqual((await removed.json()).webhook.configured, false);
+
+    const idle = await fetch(`${base}/api/webhook/test`, {
+      method: 'POST',
+      headers: json(cookie),
+      body: JSON.stringify({}),
+    });
+    assert.strictEqual(idle.status, 400, 'sin webhook guardado no hay qué probar');
+  } finally {
+    webhooks.__reset();
+    webhooks.__setSend(async () => {});
+    server.close();
+  }
+});
+
+test('webhook: el registro sale con el nombre de cada objetivo y su link', async () => {
+  const { server, base } = await listen();
+  const sent = [];
+  let cookie = '';
+  webhooks.__reset();
+  webhooks.__setSend(async (url, payload) => {
+    sent.push({ url, payload });
+  });
+
+  try {
+    const session = await login(base, OWNER, 'test-password', HWID_A);
+    cookie = session.cookie;
+    const saved = await putWebhook(base, cookie, WH_URL);
+    assert.strictEqual(saved.status, 200);
+
+    queue.push({
+      owner: OWNER,
+      created_at: new Date().toISOString(),
+      event_type: 'message',
+      message_id: '5550001112223334',
+      user_id: TARGET_ID,
+      username: 'Primera',
+      guild_id: GUILD_ID,
+      guild_name: 'Server Test',
+      channel_id: CHANNEL_ID,
+      channel_name: 'general',
+      content: 'listo, salimos',
+      metadata: {},
+    });
+    queue.push({
+      owner: OWNER,
+      created_at: new Date().toISOString(),
+      event_type: 'voice_join',
+      user_id: '666666666666666666',
+      username: 'Segunda',
+      guild_id: GUILD_ID,
+      guild_name: 'Server Test',
+      channel_id: CHANNEL_ID,
+      channel_name: 'sala',
+      metadata: {},
+    });
+    queue.push({
+      owner: OWNER,
+      created_at: new Date().toISOString(),
+      event_type: 'presence',
+      user_id: '777777777777777777',
+      username: 'Tercera',
+      guild_id: GUILD_ID,
+      guild_name: 'Server Test',
+      metadata: { from: 'offline', to: 'dnd', devices: ['desktop'], activities: [{ name: 'Juego' }] },
+    });
+    await queue.drain(2000);
+    await webhooks.drain(2000);
+
+    assert.strictEqual(sent.length, 1, 'la tanda de una cuenta sale en un solo mensaje');
+    const { url, payload } = sent[0];
+    assert.strictEqual(url, WH_URL);
+    assert.strictEqual(payload.username, 'Xyb Trace');
+    assert.ok(payload.avatar_url.endsWith('/logo.jpg'), 'la foto es la del logo');
+    assert.deepStrictEqual(payload.allowed_mentions, { parse: [] });
+    assert.strictEqual(payload.embeds.length, 3);
+
+    const [message, voice, presence] = payload.embeds;
+    assert.ok(message.title.includes('Primera'), 'el título lleva el nombre del objetivo del evento');
+    assert.ok(voice.title.includes('Segunda'), 'otro objetivo, otro nombre en su propia línea');
+    assert.ok(presence.title.includes('Tercera'));
+    assert.strictEqual(
+      message.url,
+      `https://discord.com/channels/${GUILD_ID}/${CHANNEL_ID}/5550001112223334`
+    );
+    assert.strictEqual(voice.url, `https://discord.com/channels/${GUILD_ID}/${CHANNEL_ID}`);
+    assert.ok(!('url' in presence), 'presencia no tiene canal: el log sale sin link');
+    assert.ok(message.description.includes('listo, salimos'));
+    const idOf = (item) => String((item.fields.find((field) => field.name === 'ID') || {}).value || '').replace(/`/g, '');
+    assert.ok(
+      payload.embeds.every((item) => /^\d{15,20}$/.test(idOf(item))),
+      'cada línea deja el id del objetivo a la mano'
+    );
+    assert.strictEqual(idOf(message), TARGET_ID, 'el id es el del objetivo de esa línea');
+    assert.strictEqual(idOf(voice), '666666666666666666', 'otro objetivo, otro id en su propia línea');
+  } finally {
+    await fetch(`${base}/api/webhook`, { method: 'DELETE', headers: json(cookie) });
+    webhooks.__reset();
+    webhooks.__setSend(async () => {});
+    server.close();
+  }
+});
+
+test('webhook: un canal rechazado se pausa y no frena los eventos', async () => {
+  const { server, base } = await listen();
+  let attempts = 0;
+  let cookie = '';
+  webhooks.__reset();
+  webhooks.__setSend(async () => {
+    attempts += 1;
+    throw Object.assign(new Error('HTTP 404 Unknown Webhook'), { status: 404 });
+  });
+
+  try {
+    const session = await login(base, OWNER, 'test-password', HWID_A);
+    cookie = session.cookie;
+    await putWebhook(base, cookie, WH_URL);
+    await webhooks.drain(200);
+    attempts = 0;
+
+    queue.push({
+      owner: OWNER,
+      created_at: new Date().toISOString(),
+      event_type: 'message',
+      user_id: TARGET_ID,
+      username: 'Primera',
+      guild_id: GUILD_ID,
+      guild_name: 'Server Test',
+      channel_id: CHANNEL_ID,
+      channel_name: 'general',
+      content: 'sigue acá igual',
+      metadata: {},
+    });
+    await queue.drain(2000);
+    await webhooks.drain(2000);
+
+    assert.strictEqual(attempts, 1, 'el webhook rechazado se intenta una vez y se pausa');
+
+    queue.push({
+      owner: OWNER,
+      created_at: new Date().toISOString(),
+      event_type: 'message',
+      user_id: TARGET_ID,
+      username: 'Primera',
+      guild_id: GUILD_ID,
+      guild_name: 'Server Test',
+      channel_id: CHANNEL_ID,
+      channel_name: 'general',
+      content: 'y el evento igual se escribe',
+      metadata: {},
+    });
+    await queue.drain(2000);
+    await webhooks.drain(2000);
+    assert.strictEqual(attempts, 1, 'en cooldown no se vuelve a golpear el canal');
+
+    const stored = await (await fetch(`${base}/api/events?limit=5`, { headers: { cookie } })).json();
+    assert.ok(stored.events.length >= 1, 'la base sigue recibiendo eventos aunque el webhook esté roto');
+  } finally {
+    await fetch(`${base}/api/webhook`, { method: 'DELETE', headers: json(cookie) });
+    webhooks.__reset();
+    webhooks.__setSend(async () => {});
+    server.close();
+  }
+});
+
+test('webhook: la cuenta del deploy lo guarda aunque no tenga fila en accounts', async () => {
+  const { server, base } = await listen();
+
+  try {
+    const { cookie } = await login(base, OWNER, 'test-password', HWID_A);
+    await accounts.removeAccount(OWNER);
+    accounts.__reset();
+    assert.strictEqual(await accounts.getRecord(OWNER), null, 'sin fila de cuenta');
+
+    const saved = await putWebhook(base, cookie, WH_URL);
+    assert.strictEqual(saved.status, 200, 'la cuenta de las variables también registra su webhook');
+    assert.strictEqual(saved.body.webhook.configured, true);
+
+    const record = await accounts.getRecord(OWNER);
+    assert.ok(record, 'la fila se crea al guardar');
+    assert.strictEqual(record.webhook_url, WH_URL);
+    assert.strictEqual(record.role, 'admin', 'la cuenta del deploy sigue siendo admin');
+
+    const { response } = await login(base, OWNER, 'test-password', HWID_A);
+    assert.strictEqual(response.status, 200, 'el acceso sigue siendo el de las variables');
+
+    const removed = await fetch(`${base}/api/webhook`, { method: 'DELETE', headers: json(cookie) });
+    assert.strictEqual(removed.status, 200);
+  } finally {
+    webhooks.__reset();
+    webhooks.__setSend(async () => {});
     server.close();
   }
 });

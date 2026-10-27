@@ -347,6 +347,10 @@ function renderAccount() {
   $('set-hwid-desc').textContent = account.hwid_linked
     ? `Vinculado a ${account.hwid_label || 'un dispositivo'}.`
     : 'Sin dispositivo vinculado.';
+  const webhook = account.webhook || {};
+  $('set-wh-desc').textContent = webhook.configured
+    ? `Activo en ${webhook.preview || 'un webhook de Discord'}. Cada evento llega al canal como registro de Xyb Trace, con el nombre del objetivo.`
+    : 'Sin configurar. Pegá la URL de un webhook de Discord y el panel le manda el registro de actividad.';
   $('set-meta').textContent = `@${account.username || '—'} · rol ${account.role || 'user'} · último acceso ${
     account.last_login_at ? timeAgo(account.last_login_at) : '—'}`;
   show($('onboarding'), !discord.linked && !state.bot?.configured);
@@ -1399,6 +1403,75 @@ $('set-token-save').addEventListener('click', () => {
 });
 
 $('set-token-clear').addEventListener('click', () => clearToken($('set-token-msg')));
+
+/* ------------------------------------------------------------ webhook ----- */
+
+function setWebhookView(view, box, okText) {
+  state.account = { ...(state.account || {}), webhook: view || { configured: false, preview: null } };
+  renderAccount();
+  if (box && okText) {
+    box.textContent = okText;
+    box.className = 'cfg__msg is-ok';
+  }
+}
+
+function webhookFail(box) {
+  return (error) => {
+    box.textContent = error.message;
+    box.className = 'cfg__msg is-bad';
+  };
+}
+
+$('set-wh-save').addEventListener('click', () => {
+  const box = $('set-wh-msg');
+  const url = $('set-wh-url').value.trim();
+  if (!url) {
+    box.textContent = 'Pegá la URL del webhook de Discord.';
+    box.className = 'cfg__msg is-bad';
+    return;
+  }
+  $('set-wh-save').disabled = true;
+  box.textContent = 'Guardando…';
+  box.className = 'cfg__msg';
+  api('/api/webhook', { method: 'PUT', body: { url } })
+    .then((data) => {
+      $('set-wh-url').value = '';
+      setWebhookView(data.webhook, box, 'Guardado: el registro de actividad va a ese canal.');
+      toast('Webhook guardado');
+    })
+    .catch(webhookFail(box))
+    .finally(() => { $('set-wh-save').disabled = false; });
+});
+
+$('set-wh-test').addEventListener('click', () => {
+  const box = $('set-wh-msg');
+  const url = $('set-wh-url').value.trim();
+  $('set-wh-test').disabled = true;
+  box.textContent = 'Enviando la prueba…';
+  box.className = 'cfg__msg';
+  api('/api/webhook/test', { method: 'POST', body: url ? { url } : {} })
+    .then((data) => {
+      box.textContent = `Probado: ${data.sent}`;
+      box.className = 'cfg__msg is-ok';
+      toast('Mensaje de prueba enviado');
+    })
+    .catch(webhookFail(box))
+    .finally(() => { $('set-wh-test').disabled = false; });
+});
+
+$('set-wh-clear').addEventListener('click', () => {
+  const box = $('set-wh-msg');
+  $('set-wh-clear').disabled = true;
+  box.textContent = 'Quitando…';
+  box.className = 'cfg__msg';
+  api('/api/webhook', { method: 'DELETE', body: {} })
+    .then((data) => {
+      $('set-wh-url').value = '';
+      setWebhookView(data.webhook, box, 'Webhook quitado: no se manda nada al canal.');
+    })
+    .catch(webhookFail(box))
+    .finally(() => { $('set-wh-clear').disabled = false; });
+});
 
 $('set-password-save').addEventListener('click', () => {
   const box = $('set-password-msg');

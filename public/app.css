@@ -424,6 +424,7 @@ dialog.modal[open]::backdrop { opacity: 1; }
 .cfg__desc { font-size: 11.5px; color: var(--muted-2); line-height: 1.5; }
 .cfg__row { display: flex; gap: 7px; flex-wrap: wrap; }
 .cfg__row .small { flex: 1 1 170px; }
+.cfg__row .small--url { flex: 1 1 100%; font-family: var(--mono); font-size: 11px; }
 .cfg__msg { font-size: 11.5px; color: var(--muted-2); min-height: 15px; }
 .cfg__msg.is-bad { color: #ff8e90; }
 .cfg__msg.is-ok { color: #7ee2a0; }

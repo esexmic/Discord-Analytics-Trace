@@ -12,6 +12,7 @@ const targets = require('./targets');
 const settings = require('./settings');
 const accounts = require('./accounts');
 const bot = require('./bot');
+const webhooks = require('./webhooks');
 
 const app = express();
 const COOKIE_NAME = 'xyb_session';
@@ -145,6 +146,9 @@ async function requireAuth(req, res, next) {
     const auth = await currentAuth(req);
     if (!auth) return res.status(401).json({ error: 'Iniciá sesión para continuar', code: 'unauthorized' });
     req.auth = auth;
+    // El avatar del log necesita un origen público. Se aprende de una request ya
+    // autenticada; PUBLIC_URL del deploy manda si está puesta.
+    webhooks.noteOrigin(`${req.protocol}://${req.get('host') || ''}`);
     next();
   } catch (error) {
     sendError(res, error);
@@ -754,6 +758,58 @@ app.delete('/api/settings/token', requireAuth, async (req, res) => {
   }
 });
 
+/* ---------------------------------------------------------- webhook log --- */
+
+app.get('/api/webhook', requireAuth, (req, res) => {
+  res.json({
+    ok: true,
+    webhook: req.auth.account.webhook || { configured: false, preview: null },
+    avatar_url: webhooks.avatarUrl(),
+  });
+});
+
+app.put('/api/webhook', requireAuth, async (req, res) => {
+  const owner = ownerOf(req);
+  try {
+    const webhook = await accounts.saveWebhook(owner, req.body?.url);
+    webhooks.forget(owner);
+    res.json({ ok: true, webhook, avatar_url: webhooks.avatarUrl() });
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
+app.delete('/api/webhook', requireAuth, async (req, res) => {
+  const owner = ownerOf(req);
+  try {
+    const webhook = await accounts.clearWebhook(owner);
+    webhooks.forget(owner);
+    res.json({ ok: true, webhook });
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
+/** Prueba real: con `url` pega esa sin guardarla; sin `url` usa la guardada. */
+app.post('/api/webhook/test', requireAuth, async (req, res) => {
+  const owner = ownerOf(req);
+  try {
+    const url = req.body?.url
+      ? accounts.validateWebhook(req.body.url)
+      : await accounts.webhookUrl(owner);
+    if (!url) {
+      return res.status(400).json({
+        error: 'Guardá o pegá la URL del webhook antes de probar',
+        code: 'invalid',
+      });
+    }
+    const sent = await webhooks.test(url, owner);
+    res.json({ ok: true, sent });
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
 app.post('/api/bot/reconnect', requireAuth, async (req, res) => {
   const owner = ownerOf(req);
   try {
@@ -804,6 +860,10 @@ app.delete('/api/account/hwid', requireAuth, async (req, res) => {
 
 /** res -> owner. Cada stream recibe solo los eventos de su cuenta. */
 const streamClients = new Map();
+
+// El webhook de actividad sale del mismo lote que el SSE: lo que se ve en la
+// página es exactamente lo que llega al canal.
+webhooks.attach(queue);
 
 queue.on('events', (rows) => {
   if (!rows?.length) return;
@@ -858,6 +918,8 @@ function legacyAdminName() {
 
 /** Corta el SSE de una cuenta (bloqueo o borrado): que no vea eventos más. */
 function dropStreams(owner) {
+  // Lo mismo aplica hacia afuera: se descarta lo acumulado para ese webhook.
+  webhooks.forget(owner);
   for (const [res, clientOwner] of streamClients) {
     if (clientOwner !== owner) continue;
     try {

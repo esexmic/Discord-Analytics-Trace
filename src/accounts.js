@@ -98,6 +98,39 @@ function maskToken(token) {
   return `${value.slice(0, 6)}…${value.slice(-4)}`;
 }
 
+/* ----------------------------------------------------------------- webhook -- */
+
+const WEBHOOK_MAX = 2048;
+// Un webhook de Discord es https y su token va dentro de la URL: la URL completa
+// es un secreto. Se valida contra este patrón para no guardar cualquier cosa.
+const WEBHOOK_RE = /^https:\/\/(?:(?:canary|ptb)\.)?discord(?:app)?\.com\/api\/webhooks\/(\d{15,25})\/([\w-]{1,120})$/;
+
+function validateWebhook(value) {
+  const raw = String(value ?? '')
+    .trim()
+    .replace(/^["'`]+|["'`]+$/g, '')
+    .trim();
+  if (!raw) throw authError('Pegá la URL del webhook de Discord', 'invalid');
+  if (raw.length > WEBHOOK_MAX) throw authError('La URL del webhook es demasiado larga', 'invalid');
+  if (!WEBHOOK_RE.test(raw)) {
+    throw authError('Esa no es una URL de webhook de Discord (https://discord.com/api/webhooks/…)', 'invalid');
+  }
+  return raw;
+}
+
+/** Vista para el panel: el id del webhook y cuatro caracteres del token. */
+function maskWebhook(url) {
+  const match = WEBHOOK_RE.exec(String(url || ''));
+  if (!match) return null;
+  const token = match[2];
+  return `https://discord.com/api/webhooks/${match[1]}/${token.slice(0, 4)}…`;
+}
+
+function webhookView(record) {
+  const preview = maskWebhook(record?.webhook_url);
+  return { configured: Boolean(preview), preview };
+}
+
 function publicView(record) {
   if (!record) return null;
   return {
@@ -117,6 +150,7 @@ function publicView(record) {
     boot_count: Number(record.boot_count) || 0,
     hasToken: Boolean(record.discord_token),
     discord: discordView(record),
+    webhook: webhookView(record),
   };
 }
 
@@ -728,6 +762,59 @@ async function getRecord(username) {
   return findRecord(String(username ?? '').trim().toLowerCase());
 }
 
+/* ---------------------------------------------------------------- webhook --- */
+
+/**
+ * La cuenta del deploy puede entrar con las variables del entorno sin fila en
+ * `accounts`. Guardarle algo (el webhook) necesita la fila: se crea con una
+ * contraseña aleatoria, porque el acceso de esa cuenta sigue siendo el de las
+ * variables y el login legacy tiene prioridad sobre el hash.
+ */
+async function ensureRecord(username) {
+  const existing = await findRecord(username);
+  if (existing) return existing;
+
+  const legacy = settings.accountView();
+  if (legacy.source !== 'env' || legacy.username !== username) return null;
+
+  try {
+    return await insertRecord(newRecord({
+      username,
+      password: crypto.randomBytes(24).toString('base64url'),
+      role: 'admin',
+    }));
+  } catch (error) {
+    if (error.code !== 'exists') throw error;
+    return findRecord(username);
+  }
+}
+
+/** Guarda la URL del webhook de la cuenta; reemplaza la anterior. */
+async function saveWebhook(username, url) {
+  const name = String(username ?? '').trim().toLowerCase();
+  const record = await ensureRecord(name);
+  if (!record) throw authError('La cuenta no existe', 'not_found');
+
+  const next = validateWebhook(url);
+  const updated = await updateRecord(name, { webhook_url: next });
+  return webhookView(updated || { ...record, webhook_url: next });
+}
+
+async function clearWebhook(username) {
+  const name = String(username ?? '').trim().toLowerCase();
+  const record = await ensureRecord(name);
+  if (!record) throw authError('La cuenta no existe', 'not_found');
+
+  const updated = await updateRecord(name, { webhook_url: null });
+  return webhookView(updated || { ...record, webhook_url: null });
+}
+
+/** URL cruda de la cuenta, para el despacho interno. */
+async function webhookUrl(username) {
+  const record = await getRecord(username);
+  return record?.webhook_url || null;
+}
+
 /** Valida que la cuenta siga existiendo y que la sesión no fue revocada. */
 async function validateSession(username, version) {
   const name = String(username ?? '').trim().toLowerCase();
@@ -775,6 +862,11 @@ module.exports = {
   saveDiscord,
   saveDiscordIdentity,
   clearDiscord,
+  saveWebhook,
+  clearWebhook,
+  webhookUrl,
+  maskWebhook,
+  validateWebhook,
   listWithTokens,
   touchUsage,
   listAdmin,

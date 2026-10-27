@@ -39,6 +39,18 @@ const bot = require('../src/bot');
 const targets = require('../src/targets');
 const accounts = require('../src/accounts');
 const { startServer } = require('../src/server');
+const webhooks = require('../src/webhooks');
+
+// En la demo no se sale a Discord: lo que mandaría el webhook se imprime acá, con
+// el token tapado, para ver el registro tal como llegaría al canal.
+webhooks.__setSend(async (url, payload) => {
+  const masked = url.replace(/\/(\d{15,25})\/.+$/, '/$1/•••');
+  console.log(`[demo:webhook → ${masked}] firma: ${payload.username}`);
+  for (const item of payload.embeds || []) {
+    const body = String(item.description || '').split('\n').join('\n   ');
+    console.log(`   ${item.title}\n   ${body}${item.url ? `\n   link: ${item.url}` : ''}`);
+  }
+});
 
 const OWNER = 'admin';
 const SELF_ID = '999999999999999999';
