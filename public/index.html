@@ -227,6 +227,54 @@
   </div>
 </dialog>
 
+<!-- historial de una cuenta -->
+<dialog id="history" class="modal modal--wide">
+  <div class="modal__head">
+    <div class="modal__title">Historial de <span id="history-user">—</span></div>
+    <div class="modal__tools">
+      <button id="history-refresh" class="btn btn--ghost btn--mini" type="button">Actualizar</button>
+      <button class="modal__close" data-close type="button" aria-label="Cerrar">✕</button>
+    </div>
+  </div>
+  <div class="modal__body">
+    <div class="hfilters" id="history-filters">
+      <select id="history-type" class="small" aria-label="tipo de evento">
+        <option value="">cualquier actividad</option>
+        <option value="message">mensajes</option>
+        <option value="voice">voz</option>
+        <option value="presence">presencia</option>
+        <option value="profile_update">perfil</option>
+      </select>
+      <select id="history-range" class="small" aria-label="rango de fechas">
+        <option value="">siempre</option>
+        <option value="1d">últimas 24 h</option>
+        <option value="7d">últimos 7 días</option>
+        <option value="30d">últimos 30 días</option>
+      </select>
+      <input id="history-q" class="small" type="text" placeholder="texto, usuario o canal" autocomplete="off" spellcheck="false">
+      <button id="history-apply" class="btn btn--mini btn--ghost" type="button">Filtrar</button>
+    </div>
+
+    <div id="history-count" class="hsum"></div>
+    <div id="history-list" class="hlist"></div>
+    <button id="history-more" class="btn btn--ghost btn--mini hidden" type="button">Cargar más</button>
+
+    <div class="hbar">
+      <label class="hbar__all">
+        <input id="history-check-all" type="checkbox">
+        <span>Seleccionar lo cargado</span>
+      </label>
+      <div class="hbar__acts">
+        <button id="history-del-sel" class="btn btn--danger btn--mini" type="button" disabled>Borrar selección</button>
+        <button id="history-del-filt" class="btn btn--danger btn--mini hidden" type="button">Borrar por filtro</button>
+        <button id="history-del-all" class="btn btn--danger btn--mini" type="button">Borrar todo</button>
+      </div>
+    </div>
+
+    <div class="error" id="history-error"></div>
+  </div>
+</dialog>
+
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
 <script src="/app.js" defer></script>

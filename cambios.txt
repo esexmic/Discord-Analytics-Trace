@@ -231,3 +231,48 @@ ESTADO Y FLUJO
 NO CAMBIA
 - Tokens y contraseñas siguen sin salir del server: el admin ve token_preview
   y fija una contraseña nueva, nunca lee la vieja (hash scrypt).
+
+v1.6 — 26/10/2026 · HISTORIAL POR CUENTA (borrado selectivo)
+===========================================================
+
+DÓNDE VIVE
+- Dialog #history en index.html, con .modal--wide (el mismo ancho que #admin).
+- Lógica en public/app.js, sección "historial" (justo después de la de admin).
+- Estilos en public/app.css, bloque .hfilters / .hsum / .hlist / .hrow / .hbar.
+- Server: GET y DELETE /api/admin/accounts/:user/history en src/server.js.
+
+CÓMO SE VE
+- Cada .acct del panel de gestión suma un botón "Historial" (siempre primero en
+  .acct__actions). No aparece cuando no hay base de datos configurada.
+- .hfilters: select de tipo (mensajes / voz / presencia / perfil), select de
+  rango (24 h / 7 d / 30 d / siempre), input de texto y botón Filtrar.
+- .hsum: línea en mono con el total ("16 eventos en el historial", "4 eventos
+  con el filtro · 2 seleccionados").
+- .hlist: scroll de hasta 46vh. Cada .hrow es checkbox + .hrow__icon (mismo
+  icono y color por tipo que el feed) + usuario, verbo, fecha y hora, texto del
+  evento y las tags de canal/servidor.
+- .hbar abajo: "Seleccionar lo cargado" a la izquierda; a la derecha
+  "Borrar selección (N)", "Borrar los N del filtro" (solo con filtro activo) y
+  "Borrar todo".
+
+ESTADO Y FLUJO
+- state.history = { user, rows, total, hasMore, checked:Set, seq, controller,
+  busy }. null cuando se cierra el dialog.
+- loadHistory() corta la request anterior con AbortController + seq, como el
+  feed: cambiar de filtro o de cuenta nunca deja una respuesta vieja pisando la
+  nueva.
+- historyMeta() es la parte que toca la barra; los checkboxes llaman solo a
+  historyMeta(), no re-renderizan la lista, así la selección no pierde el
+  scroll.
+- Borrar selección manda los ids en lotes de 500 (HISTORY_CHUNK); "Borrar todo"
+  y "Borrar los N del filtro" piden un segundo clic y se revierten solos a los
+  4s, igual que el botón Borrar de una cuenta.
+- Después de borrar: se recargan el historial y la grilla de cuentas, se
+  invalida el resumen de esa cuenta y, si el historial era el propio, también se
+  recarga el feed.
+
+NO CAMBIA
+- Sigue sin hacer falta correr schema.sql: se usa events.id (bigserial) y los
+  índices por owner que ya trajo la v3.
+- El borrado siempre va filtrado por owner del lado del server; un id de otra
+  cuenta en la selección no borra nada afuera.

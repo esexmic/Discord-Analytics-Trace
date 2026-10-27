@@ -849,6 +849,13 @@ app.get('/api/stream', requireAuth, (req, res) => {
 
 const ADMIN_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
+/** Nombre de la cuenta del deploy (variables de entorno), si existe. */
+function legacyAdminName() {
+  const legacy = settings.accountView();
+  if (legacy.source === 'none' || !legacy.username) return null;
+  return String(legacy.username).toLowerCase();
+}
+
 /** Corta el SSE de una cuenta (bloqueo o borrado): que no vea eventos más. */
 function dropStreams(owner) {
   for (const [res, clientOwner] of streamClients) {
@@ -923,9 +930,8 @@ app.get('/api/admin/accounts', requireAuth, requireAdmin, async (req, res) => {
       adminUsage(since),
     ]);
 
-    const legacy = settings.accountView();
-    const legacyName = legacy.source !== 'none' && legacy.username ? String(legacy.username) : null;
-    const known = new Set(rows.map((row) => String(row.username)));
+    const legacyName = legacyAdminName();
+    const known = new Set(rows.map((row) => String(row.username).toLowerCase()));
     if (legacyName && !known.has(legacyName)) {
       rows.push({
         username: legacyName,
@@ -942,7 +948,7 @@ app.get('/api/admin/accounts', requireAuth, requireAdmin, async (req, res) => {
     res.json({
       accounts: rows.map((row) => ({
         ...accounts.publicView(row),
-        legacy: legacyName ? String(row.username) === legacyName : Boolean(row.legacy),
+        legacy: legacyName ? String(row.username).toLowerCase() === legacyName : Boolean(row.legacy),
         self: String(row.username) === me,
         events_7d: usageInfo.usage.get(String(row.username))?.events ?? 0,
         targets: usageInfo.usage.get(String(row.username))?.targets ?? 0,
@@ -1006,8 +1012,7 @@ app.post('/api/admin/accounts/:username/role', requireAuth, requireAdmin, async 
 app.post('/api/admin/accounts/:username/password', requireAuth, requireAdmin, async (req, res) => {
   const target = String(req.params.username || '').toLowerCase();
   try {
-    const legacy = settings.accountView();
-    if (legacy.source !== 'none' && legacy.username === target) {
+    if (target && legacyAdminName() === target) {
       return res.status(409).json({
         error: 'La cuenta del deploy cambia de contraseña en las variables del deploy, no acá',
       });
@@ -1066,6 +1071,165 @@ app.delete('/api/admin/accounts/:username', requireAuth, requireAdmin, async (re
     invalidateSummary(target);
     dropStreams(target);
     res.json({ ok: true, removed: target });
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
+/* ------------------------------------------------------------- historial -- */
+
+const HISTORY_LIMIT = 200;
+const HISTORY_CHUNK = 500;
+const VOICE_EVENTS = ['voice_join', 'voice_leave', 'voice_move', 'voice_stream', 'voice_camera'];
+const MESSAGE_EVENTS = ['message', 'message_edit', 'message_delete'];
+const HISTORY_TYPES = new Set([
+  ...MESSAGE_EVENTS, ...VOICE_EVENTS, 'presence', 'profile_update', 'voice', 'message',
+]);
+
+/** Filtros compartidos por la lectura y el borrado del historial de una cuenta. */
+function historyFilters(input = {}) {
+  const type = String(input.type || '').trim();
+  const search = sanitizeSearch(input.q);
+  const stamp = (value) => {
+    const text = String(value ?? '').trim().slice(0, 40);
+    if (!text) return null;
+    const ms = Date.parse(text);
+    return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
+  };
+  const filters = {
+    type: HISTORY_TYPES.has(type) ? type : '',
+    from: stamp(input.from),
+    to: stamp(input.to),
+    search,
+  };
+  filters.active = Boolean(filters.type || filters.from || filters.to || filters.search);
+  return filters;
+}
+
+function historyWhere(query, filters) {
+  let scoped = query;
+  if (filters.type === 'voice') scoped = scoped.in('event_type', VOICE_EVENTS);
+  else if (filters.type === 'message') scoped = scoped.in('event_type', MESSAGE_EVENTS);
+  else if (filters.type) scoped = scoped.eq('event_type', filters.type);
+  if (filters.from) scoped = scoped.gte('created_at', filters.from);
+  if (filters.to) scoped = scoped.lte('created_at', filters.to);
+  if (filters.search) {
+    scoped = scoped.or(
+      `username.ilike.%${filters.search}%,content.ilike.%${filters.search}%,`
+      + `old_content.ilike.%${filters.search}%,channel_name.ilike.%${filters.search}%`
+    );
+  }
+  return scoped;
+}
+
+async function historyTarget(req, res) {
+  const target = String(req.params.username || '').toLowerCase();
+  if (!db.isConfigured()) {
+    res.status(503).json({ error: 'Sin base de datos no hay historial que revisar', code: 'not_configured' });
+    return null;
+  }
+  const record = await accounts.getRecord(target);
+  if (!record) {
+    // La cuenta del deploy vive en las variables: puede tener historial sin fila en accounts.
+    if (target && target === legacyAdminName()) return { target, status: 'active' };
+    res.status(404).json({ error: 'La cuenta no existe', code: 'not_found' });
+    return null;
+  }
+  return { target, status: record.status || 'active' };
+}
+
+app.get('/api/admin/accounts/:username/history', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const account = await historyTarget(req, res);
+    if (!account) return;
+    const target = account.target;
+
+    const filters = historyFilters(req.query);
+    const limit = Math.min(Number.parseInt(req.query.limit, 10) || HISTORY_LIMIT, HISTORY_LIMIT);
+    const offset = Math.max(Number.parseInt(req.query.offset, 10) || 0, 0);
+    const client = db.getClient();
+
+    const countQuery = historyWhere(
+      client.from('events').select('*', { count: 'exact', head: true }).eq('owner', target),
+      filters
+    );
+    const pageQuery = historyWhere(
+      client.from('events').select('*').eq('owner', target)
+        .order('created_at', { ascending: false })
+        .order('id', { ascending: false })
+        .range(offset, offset + limit - 1),
+      filters
+    );
+
+    const [page, counted] = await Promise.all([pageQuery, countQuery]);
+    const failure = page.error || counted.error;
+    if (failure) {
+      db.noteFailure(failure);
+      return res.status(503).json({ error: `La base no pudo leer el historial: ${failure.message}`, code: 'db_unavailable' });
+    }
+
+    const rows = page.data || [];
+    const total = Number.isFinite(counted.count) ? counted.count : rows.length;
+    res.json({
+      account: { username: target, status: account.status },
+      events: rows,
+      total,
+      limit,
+      offset,
+      hasMore: offset + rows.length < total,
+      newestAt: rows[0]?.created_at || null,
+      oldestAt: rows.at(-1)?.created_at || null,
+      filters,
+    });
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
+/**
+ * Borra el historial de una cuenta: todo, por filtro o una selección de ids.
+ * Todo pasa por `owner`, así una selección ajena no puede tocar otras cuentas.
+ */
+app.delete('/api/admin/accounts/:username/history', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const account = await historyTarget(req, res);
+    if (!account) return;
+    const target = account.target;
+
+    const client = db.getClient();
+    const scope = String(req.body?.scope || (Array.isArray(req.body?.ids) ? 'ids' : ''));
+
+    let query;
+    if (scope === 'all') {
+      query = client.from('events').delete().eq('owner', target).select('id');
+    } else if (scope === 'ids') {
+      const ids = (Array.isArray(req.body?.ids) ? req.body.ids : [])
+        .map((id) => String(id).trim())
+        .filter((id) => /^\d{1,20}$/.test(id));
+      if (!ids.length) return res.status(400).json({ error: 'No hay IDs de eventos válidos para borrar' });
+      if (ids.length > HISTORY_CHUNK) {
+        return res.status(400).json({ error: `Máximo ${HISTORY_CHUNK} eventos por vez` });
+      }
+      query = client.from('events').delete().eq('owner', target).in('id', ids).select('id');
+    } else if (scope === 'query') {
+      const filters = historyFilters(req.body || {});
+      if (!filters.active) {
+        return res.status(400).json({ error: 'Elegí un filtro o borrá todo el historial' });
+      }
+      query = historyWhere(client.from('events').delete().eq('owner', target), filters).select('id');
+    } else {
+      return res.status(400).json({ error: 'Decidí qué borrar: todos, por filtro o una selección' });
+    }
+
+    const out = await query;
+    if (out.error) {
+      db.noteFailure(out.error);
+      return res.status(503).json({ error: `La base no pudo borrar el historial: ${out.error.message}`, code: 'db_unavailable' });
+    }
+
+    const removed = (out.data || []).length;
+    invalidateSummary(target);
+    res.json({ ok: true, removed, scope });
   } catch (error) {
     sendError(res, error);
   }

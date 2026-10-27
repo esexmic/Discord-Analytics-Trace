@@ -49,6 +49,7 @@ const state = {
   hwidReady: false,
   admin: null,
   adminSeq: 0,
+  history: null,
 };
 
 const EVENT_TYPES = [
@@ -1518,6 +1519,7 @@ function accountCard(row) {
 
   const actions = el('div', 'acct__actions');
   const forms = el('div', 'acct__forms');
+  const canHistory = Boolean(state.admin?.db?.configured);
 
   const toggle = (id, label, variant) => {
     const button = el('button', `btn btn--mini ${variant || 'btn--ghost'}`, label);
@@ -1540,6 +1542,13 @@ function accountCard(row) {
   };
 
   const reload = () => loadAdmin();
+
+  if (canHistory) {
+    const button = el('button', 'btn btn--ghost btn--mini', 'Historial');
+    button.type = 'button';
+    button.addEventListener('click', () => openHistory(row.username));
+    actions.append(button);
+  }
 
   if (row.legacy) {
     actions.append(el('span', 'acct__note', 'Cuenta del deploy: la contraseña se cambia en las variables.'));
@@ -1708,6 +1717,358 @@ admin.addEventListener('click', (event) => {
   if (event.target === admin || event.target.closest('[data-close]')) closeModal(admin);
 });
 
+/* -------------------------------------------------------------- historial -- */
+
+const history = $('history');
+
+const HISTORY_CHUNK = 500;
+const RANGE_DAYS = { '1d': 1, '7d': 7, '30d': 30 };
+
+function blankHistory(user) {
+  return {
+    user,
+    rows: [],
+    total: 0,
+    hasMore: false,
+    checked: new Set(),
+    seq: 0,
+    controller: null,
+    busy: false,
+  };
+}
+
+function readHistoryFilters() {
+  return {
+    type: $('history-type').value,
+    range: $('history-range').value,
+    q: $('history-q').value.trim(),
+  };
+}
+
+function historyActive(filters) {
+  return Boolean(filters.type || filters.range || filters.q);
+}
+
+/** `from` va en ISO: el server lo valida con Date.parse y lo recorta. */
+function historyFrom(range) {
+  const days = RANGE_DAYS[range];
+  return days ? new Date(Date.now() - days * 864e5).toISOString() : '';
+}
+
+function historyText(event) {
+  const meta = event.metadata || {};
+  const clip = (value) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, 240);
+  const stayed = formatDuration(meta.seconds);
+
+  switch (event.event_type) {
+    case 'message':
+      return clip(event.content) || '[sin texto]';
+    case 'message_edit':
+      return `${clip(event.old_content) || '(sin original)'} → ${clip(event.content) || '(vacío)'}`;
+    case 'message_delete':
+      return clip(event.content) || '(sin texto)';
+    case 'voice_join':
+      return `entró a ${clip(event.channel_name || event.channel_id) || 'un canal'}`;
+    case 'voice_leave':
+      return `salió de ${clip(event.channel_name || event.channel_id) || 'un canal'}${stayed ? ` · estuvo ${stayed}` : ''}`;
+    case 'voice_move':
+      return `${clip(meta.from_name || meta.from) || '—'} → ${clip(event.channel_name || event.channel_id) || '—'}`;
+    case 'voice_stream':
+      return meta.streaming ? 'empezó a transmitir' : 'dejó de transmitir';
+    case 'voice_camera':
+      return meta.camera ? 'encendió la cámara' : 'apagó la cámara';
+    case 'presence':
+      return `${clip(meta.from) || '—'} → ${clip(meta.to) || '—'}`;
+    default:
+      return clip(event.content) || clip(meta.to) || event.event_type;
+  }
+}
+
+function historyRow(event) {
+  const st = state.history;
+  const id = event.id === undefined || event.id === null ? '' : String(event.id);
+
+  const row = el('div', 'hrow');
+  row.dataset.id = id;
+
+  const box = el('input', 'hrow__check');
+  box.type = 'checkbox';
+  box.value = id;
+  box.disabled = !id;
+  box.checked = st.checked.has(id);
+  box.setAttribute('aria-label', 'seleccionar evento');
+  row.append(box);
+
+  const meta = TYPES[event.event_type] || { icon: '•', cls: 'message', verb: event.event_type };
+  row.append(el('span', `hrow__icon hrow__icon--${meta.cls}`, meta.icon));
+
+  const main = el('div', 'hrow__main');
+  const head = el('div', 'hrow__head');
+  head.append(el('span', 'hrow__user', event.username || String(event.user_id || '—')));
+  head.append(el('span', 'hrow__verb', meta.verb));
+  const time = el('time', 'hrow__time', stamp(event.created_at) || '—');
+  time.title = timeAgo(event.created_at) || '';
+  head.append(time);
+  main.append(head);
+
+  main.append(el('div', 'hrow__text', historyText(event)));
+
+  const tags = el('div', 'hrow__tags');
+  if (event.channel_name) tags.append(el('span', 'tag', `#${event.channel_name}`));
+  if (event.guild_name) tags.append(el('span', 'tag', event.guild_name));
+  if (tags.childElementCount) main.append(tags);
+
+  row.append(main);
+  return row;
+}
+
+function historyMeta() {
+  const st = state.history;
+  if (!st) return;
+  const filters = readHistoryFilters();
+  const filtered = historyActive(filters);
+
+  const bits = [];
+  bits.push(st.total ? `${st.total} evento${st.total === 1 ? '' : 's'}${filtered ? ' con el filtro' : ' en el historial'}` : 'Sin eventos');
+  if (filtered && st.total > st.rows.length) bits.push(`${st.rows.length} cargados`);
+  if (st.checked.size) bits.push(`${st.checked.size} seleccionados`);
+  $('history-count').textContent = bits.join(' · ');
+
+  const boxes = [...$('history-list').querySelectorAll('input[type=checkbox]:not(:disabled)')];
+  const all = boxes.filter((box) => box.checked).length;
+  const checkAll = $('history-check-all');
+  checkAll.checked = boxes.length > 0 && all === boxes.length;
+  checkAll.indeterminate = all > 0 && all < boxes.length;
+  checkAll.disabled = boxes.length === 0;
+
+  const delSel = $('history-del-sel');
+  if (delSel.dataset.armed !== '1') {
+    delSel.textContent = st.checked.size ? `Borrar selección (${st.checked.size})` : 'Borrar selección';
+  }
+  delSel.disabled = st.busy || st.checked.size === 0;
+
+  const delFilt = $('history-del-filt');
+  show(delFilt, filtered && st.total > 0);
+  delFilt.disabled = st.busy;
+  if (delFilt.dataset.armed !== '1') {
+    delFilt.textContent = filtered && st.total ? `Borrar los ${st.total} del filtro` : 'Borrar por filtro';
+  }
+
+  const delAll = $('history-del-all');
+  delAll.disabled = st.busy;
+
+  const more = $('history-more');
+  show(more, st.hasMore);
+  more.disabled = st.busy;
+}
+
+function renderHistory() {
+  const st = state.history;
+  if (!st) return;
+  const list = $('history-list');
+  if (!st.rows.length) {
+    list.replaceChildren(el('div', 'hint', historyActive(readHistoryFilters())
+      ? 'Ningún evento coincide con el filtro.'
+      : 'El historial de esta cuenta está vacío.'));
+  } else {
+    list.replaceChildren(...st.rows.map(historyRow));
+  }
+  historyMeta();
+}
+
+async function loadHistory({ append = false } = {}) {
+  const st = state.history;
+  if (!st) return;
+  if (st.controller) st.controller.abort();
+
+  const controller = new AbortController();
+  st.controller = controller;
+  const seq = ++st.seq;
+  st.busy = true;
+  $('history-error').textContent = '';
+  if (!append) $('history-list').replaceChildren(el('div', 'hint', 'Cargando historial…'));
+  historyMeta();
+
+  const params = new URLSearchParams();
+  const filters = readHistoryFilters();
+  if (filters.type) params.set('type', filters.type);
+  if (filters.q) params.set('q', filters.q);
+  const from = historyFrom(filters.range);
+  if (from) params.set('from', from);
+  params.set('offset', String(append ? st.rows.length : 0));
+
+  try {
+    const data = await api(`/api/admin/accounts/${encodeURIComponent(st.user)}/history?${params}`, {
+      signal: controller.signal,
+    });
+    if (seq !== st.seq) return;
+    const rows = data.events || [];
+    st.rows = append ? st.rows.concat(rows) : rows;
+    st.total = Number(data.total) || 0;
+    st.hasMore = Boolean(data.hasMore);
+    if (!append) st.checked.clear();
+  } catch (error) {
+    if (error.name === 'AbortError' || seq !== st.seq) return;
+    $('history-error').textContent = error.message;
+    if (error.status === 401) { closeHistory(); toAuth(); return; }
+    if (error.status === 403) { closeHistory(); return; }
+    if (error.status === 404) { closeHistory(); toast(error.message, 'bad'); return; }
+    if (!append) $('history-list').replaceChildren(el('div', 'hint', 'No se pudo leer el historial.'));
+  }
+
+  st.busy = false;
+  if (seq === st.seq) renderHistory();
+}
+
+/** Botón que exige un segundo clic antes de actuar. */
+function armHistory(button, ask, run) {
+  if (button.dataset.armed !== '1') {
+    button.dataset.armed = '1';
+    button.textContent = ask;
+    setTimeout(() => {
+      if (button.dataset.armed !== '1') return;
+      button.dataset.armed = '0';
+      button.textContent = button.dataset.label || ask;
+      historyMeta();
+    }, 4200);
+    return;
+  }
+  button.dataset.armed = '0';
+  button.textContent = button.dataset.label || ask;
+  adminRun(button, run);
+}
+
+async function deleteHistory(scope, body, done) {
+  const st = state.history;
+  if (!st || st.busy) return;
+
+  const ids = scope === 'ids' ? [...st.checked] : [];
+  if (scope === 'ids' && !ids.length) return;
+
+  st.busy = true;
+  historyMeta();
+
+  let removed = 0;
+  try {
+    if (scope === 'ids') {
+      for (let i = 0; i < ids.length; i += HISTORY_CHUNK) {
+        const out = await api(`/api/admin/accounts/${encodeURIComponent(st.user)}/history`, {
+          method: 'DELETE',
+          body: { scope: 'ids', ids: ids.slice(i, i + HISTORY_CHUNK) },
+        });
+        removed += Number(out.removed) || 0;
+      }
+      for (const id of ids) st.checked.delete(id);
+    } else {
+      const out = await api(`/api/admin/accounts/${encodeURIComponent(st.user)}/history`, {
+        method: 'DELETE',
+        body: { scope, ...body },
+      });
+      removed = Number(out.removed) || 0;
+      if (scope === 'all') st.checked.clear();
+    }
+    toast(done(removed));
+  } catch (error) {
+    st.busy = false;
+    historyMeta();
+    $('history-error').textContent = error.message;
+    if (error.status === 401) { closeHistory(); toAuth(); return; }
+    toast(error.message, 'bad');
+    return;
+  }
+
+  st.busy = false;
+  const own = String(state.account?.username || '').toLowerCase() === st.user.toLowerCase();
+  await Promise.all([loadHistory(), loadAdmin()]);
+  if (own) await loadFeed();
+  refreshSummary({ immediate: true });
+}
+
+function openHistory(username) {
+  if (!state.admin?.db?.configured) {
+    toast('Sin base de datos no hay historial que revisar', 'bad');
+    return;
+  }
+  state.history = blankHistory(username);
+  $('history-user').textContent = username;
+  $('history-error').textContent = '';
+  $('history-type').value = '';
+  $('history-range').value = '';
+  $('history-q').value = '';
+  for (const button of [$('history-del-sel'), $('history-del-filt'), $('history-del-all')]) {
+    button.dataset.armed = '0';
+    button.textContent = button.dataset.label;
+  }
+  openModal(history);
+  loadHistory();
+}
+
+function closeHistory() {
+  const st = state.history;
+  if (st?.controller) st.controller.abort();
+  if (st) st.seq += 1;
+  state.history = null;
+  closeModal(history);
+}
+
+$('history-refresh').addEventListener('click', () => loadHistory());
+$('history-apply').addEventListener('click', () => loadHistory());
+$('history-q').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') loadHistory();
+});
+$('history-more').addEventListener('click', () => loadHistory({ append: true }));
+
+$('history-list').addEventListener('change', (event) => {
+  const st = state.history;
+  const box = event.target;
+  if (!st || !(box instanceof HTMLInputElement) || box.type !== 'checkbox' || !box.value) return;
+  if (box.checked) st.checked.add(box.value);
+  else st.checked.delete(box.value);
+  historyMeta();
+});
+
+$('history-check-all').addEventListener('change', (event) => {
+  const st = state.history;
+  if (!st) return;
+  const on = event.target.checked;
+  for (const box of $('history-list').querySelectorAll('input[type=checkbox]:not(:disabled)')) {
+    box.checked = on;
+    if (on) st.checked.add(box.value);
+    else st.checked.delete(box.value);
+  }
+  historyMeta();
+});
+
+$('history-del-sel').dataset.label = 'Borrar selección';
+$('history-del-filt').dataset.label = 'Borrar por filtro';
+$('history-del-all').dataset.label = 'Borrar todo';
+
+$('history-del-sel').addEventListener('click', () => {
+  armHistory($('history-del-sel'), `Confirmar ${state.history?.checked.size || 0}`, () =>
+    deleteHistory('ids', null, (n) => `${n} evento${n === 1 ? '' : 's'} borrados de la selección`));
+});
+
+$('history-del-filt').addEventListener('click', () => {
+  const filters = readHistoryFilters();
+  armHistory($('history-del-filt'), 'Confirmar borrado', () =>
+    deleteHistory('query', {
+      type: filters.type,
+      q: filters.q,
+      from: historyFrom(filters.range),
+    }, (n) => `${n} evento${n === 1 ? '' : 's'} borrados con ese filtro`));
+});
+
+$('history-del-all').addEventListener('click', () => {
+  armHistory($('history-del-all'), '¿Borrar TODO su historial?', () =>
+    deleteHistory('all', null, (n) => `${n} evento${n === 1 ? '' : 's'} borrados de ${state.history?.user || ''}`));
+});
+
+history.addEventListener('click', (event) => {
+  if (event.target === history || event.target.closest('[data-close]')) closeHistory();
+});
+history.addEventListener('cancel', () => closeHistory());
+admin.addEventListener('cancel', () => closeModal(admin));
+
 /* --------------------------------------------------------------- sidebar -- */
 
 function openSidebar(on) {
@@ -1744,6 +2105,7 @@ function toAuth() {
   state.adminSeq += 1;
   show($('open-admin'), false);
   closeModal(admin);
+  closeHistory();
   show($('app'), false);
   show($('auth'), true);
   show($('boot'), false);

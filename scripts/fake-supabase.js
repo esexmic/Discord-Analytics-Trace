@@ -9,6 +9,12 @@ function clone(value) {
   return value === undefined ? value : JSON.parse(JSON.stringify(value));
 }
 
+function project(rows, columns) {
+  if (columns === '*' || typeof columns !== 'string') return rows;
+  const wanted = columns.split(',').map((column) => column.trim()).filter(Boolean);
+  return rows.map((row) => Object.fromEntries(wanted.map((column) => [column, row[column]])));
+}
+
 function ilike(value, pattern) {
   const escaped = String(pattern)
     .replace(/[.+^${}()|[\]\\]/g, '\\$&')
@@ -46,7 +52,7 @@ class Query {
   }
 
   select(columns = '*', options = {}) {
-    if (this.op === 'select') {
+    if (this.op === 'select' || this.op === 'delete') {
       this.columns = columns;
       this.countOnly = Boolean(options.count === 'exact' && options.head);
     }
@@ -183,7 +189,7 @@ class Query {
     if (this.op === 'delete') {
       const kept = this.rows.filter((row) => !selected.includes(row));
       this.store.set(this.table, kept);
-      return { data: clone(selected), error: null };
+      return { data: project(clone(selected), this.columns), error: null };
     }
 
     for (const { column, ascending } of [...this.orders].reverse()) {
@@ -199,11 +205,7 @@ class Query {
     }
     if (this.limitN !== null) selected = selected.slice(0, this.limitN);
 
-    let data = clone(selected);
-    if (this.columns !== '*' && typeof this.columns === 'string') {
-      const columns = this.columns.split(',').map((column) => column.trim()).filter(Boolean);
-      data = data.map((row) => Object.fromEntries(columns.map((column) => [column, row[column]])));
-    }
+    const data = project(clone(selected), this.columns);
 
     return { data, error: null };
   }

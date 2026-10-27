@@ -903,6 +903,185 @@ test('admin: borrar una cuenta se lleva sus objetivos y sus eventos', async () =
   }
 });
 
+/* -------------------------------------------------------------- historial -- */
+
+function pushEvent(row) {
+  const stored = {
+    owner: OWNER,
+    event_type: 'message',
+    user_id: TARGET_ID,
+    username: 'target',
+    guild_id: GUILD_ID,
+    guild_name: 'Server Test',
+    channel_id: CHANNEL_ID,
+    channel_name: 'general',
+    content: '',
+    metadata: {},
+    created_at: new Date().toISOString(),
+    ...row,
+    id: nextId++,
+  };
+  store.get('events').push(stored);
+  return stored;
+}
+
+async function deleteHistory(base, cookie, name, body) {
+  const response = await fetch(`${base}/api/admin/accounts/${name}/history`, {
+    method: 'DELETE',
+    headers: json(cookie),
+    body: JSON.stringify(body),
+  });
+  return { status: response.status, body: await response.json() };
+}
+
+test('historial: el admin lee el historial de una cuenta y borra lo que elige', async () => {
+  const { server, base } = await listen();
+  const NAME = 'historica';
+
+  try {
+    const victim = await registerUser(base, { username: NAME, password: 'clave-de-historial-1', hwid: 'f'.repeat(64) });
+    assert.strictEqual(victim.response.status, 200);
+
+    const mine = [
+      pushEvent({ owner: NAME, event_type: 'message', content: 'secreto uno' }),
+      pushEvent({ owner: NAME, event_type: 'voice_join' }),
+      pushEvent({ owner: NAME, event_type: 'presence' }),
+    ];
+    const foreign = pushEvent({ owner: OWNER, content: 'no es de esa cuenta' });
+
+    const { cookie } = await login(base, OWNER, 'test-password', HWID_A);
+
+    const denied = await fetch(`${base}/api/admin/accounts/${NAME}/history`, { headers: { cookie: victim.cookie } });
+    assert.strictEqual(denied.status, 403, 'leer el historial es tarea de admin');
+
+    const missing = await fetch(`${base}/api/admin/accounts/nadie/history`, { headers: { cookie } });
+    assert.strictEqual(missing.status, 404, 'sin cuenta no hay historial');
+
+    const page = await (await fetch(`${base}/api/admin/accounts/${NAME}/history`, { headers: { cookie } })).json();
+    assert.strictEqual(page.account.username, NAME);
+    assert.strictEqual(page.total, 3);
+    assert.strictEqual(page.events.length, 3);
+    assert.strictEqual(page.hasMore, false);
+    assert.ok(page.events.every((event) => event.owner === NAME), 'sólo devuelve eventos de esa cuenta');
+    assert.ok(page.newestAt && page.oldestAt, 'marca el rango leído');
+
+    const byType = await (await fetch(`${base}/api/admin/accounts/${NAME}/history?type=message`, { headers: { cookie } })).json();
+    assert.strictEqual(byType.total, 1, 'el filtro de tipo achica el total');
+    assert.strictEqual(byType.events[0].event_type, 'message');
+
+    const byVoice = await (await fetch(`${base}/api/admin/accounts/${NAME}/history?type=voice`, { headers: { cookie } })).json();
+    assert.strictEqual(byVoice.total, 1, 'voz agrupa join/leave/move');
+
+    const byText = await (await fetch(`${base}/api/admin/accounts/${NAME}/history?q=secreto`, { headers: { cookie } })).json();
+    assert.strictEqual(byText.total, 1);
+
+    const byDate = await (await fetch(
+      `${base}/api/admin/accounts/${NAME}/history?from=${encodeURIComponent(new Date(Date.now() + 60_000).toISOString())}`,
+      { headers: { cookie } }
+    )).json();
+    assert.strictEqual(byDate.total, 0, 'un rango futuro no lee nada');
+
+    const mixed = await deleteHistory(base, cookie, NAME, {
+      scope: 'ids',
+      ids: [mine[0].id, foreign.id, 'basura', '99999999999999999999999'],
+    });
+    assert.strictEqual(mixed.status, 200);
+    assert.strictEqual(mixed.body.removed, 1, 'de la selección sólo se borra lo de esa cuenta');
+    assert.ok(store.get('events').some((row) => row.id === foreign.id), 'el evento de otro owner queda intacto');
+
+    const afterIds = await (await fetch(`${base}/api/admin/accounts/${NAME}/history`, { headers: { cookie } })).json();
+    assert.strictEqual(afterIds.total, 2);
+
+    const lazy = await deleteHistory(base, cookie, NAME, { scope: 'query' });
+    assert.strictEqual(lazy.status, 400, 'borrar por filtro exige un filtro');
+
+    const byQuery = await deleteHistory(base, cookie, NAME, { scope: 'query', type: 'presence' });
+    assert.strictEqual(byQuery.status, 200);
+    assert.strictEqual(byQuery.body.removed, 1);
+
+    const everything = await deleteHistory(base, cookie, NAME, { scope: 'all' });
+    assert.strictEqual(everything.status, 200);
+    assert.strictEqual(everything.body.removed, 1);
+    assert.strictEqual(store.get('events').filter((row) => row.owner === NAME).length, 0, 'el historial queda vacío');
+    assert.ok(store.get('events').some((row) => row.owner === OWNER), 'el historial del admin no se toca');
+
+    const feed = await (await fetch(`${base}/api/events`, { headers: { cookie: victim.cookie } })).json();
+    assert.strictEqual(feed.events.length, 0, 'el feed de la cuenta también queda vacío');
+
+    const empty = await (await fetch(`${base}/api/admin/accounts/${NAME}/history`, { headers: { cookie } })).json();
+    assert.strictEqual(empty.total, 0);
+    assert.strictEqual(empty.events.length, 0);
+    assert.strictEqual(empty.hasMore, false);
+  } finally {
+    server.close();
+  }
+});
+
+test('historial: una decisión vacía o imposible devuelve 400 y no borra nada', async () => {
+  const { server, base } = await listen();
+  const NAME = 'historial-tenaz';
+
+  try {
+    await registerUser(base, { username: NAME, password: 'clave-de-historial-2', hwid: '8'.repeat(64) });
+    const kept = pushEvent({ owner: NAME, content: 'sigo acá' });
+    const { cookie } = await login(base, OWNER, 'test-password', HWID_A);
+
+    const noScope = await deleteHistory(base, cookie, NAME, {});
+    assert.strictEqual(noScope.status, 400, 'hay que decir qué se borra');
+
+    const noIds = await deleteHistory(base, cookie, NAME, { scope: 'ids', ids: [] });
+    assert.strictEqual(noIds.status, 400);
+
+    const junkIds = await deleteHistory(base, cookie, NAME, { scope: 'ids', ids: ['abc', null, '2.5'] });
+    assert.strictEqual(junkIds.status, 400, 'ids que no son números se rechazan');
+
+    const tooMany = await deleteHistory(base, cookie, NAME, {
+      scope: 'ids',
+      ids: Array.from({ length: 501 }, (unused, index) => String(index + 1)),
+    });
+    assert.strictEqual(tooMany.status, 400, 'el lote de ids tiene techo');
+
+    const future = await deleteHistory(base, cookie, NAME, {
+      scope: 'query',
+      from: new Date(Date.now() + 60_000).toISOString(),
+    });
+    assert.strictEqual(future.status, 200, 'un filtro válido borra aunque no coincida');
+    assert.strictEqual(future.body.removed, 0);
+
+    assert.ok(store.get('events').some((row) => row.id === kept.id), 'ningún rechazo tocó el historial');
+  } finally {
+    server.close();
+  }
+});
+
+test('historial: la cuenta del deploy tiene historial aunque no tenga fila en accounts', async () => {
+  const { server, base } = await listen();
+
+  try {
+    pushEvent({ owner: OWNER, content: 'evento del deploy' });
+    const { cookie } = await login(base, OWNER, 'test-password', HWID_A);
+    assert.ok(await accounts.getRecord(OWNER), 'el login del deploy crea su fila');
+
+    // Deploy recién migrado: la cuenta vive en las variables pero aún no tiene registro.
+    await accounts.removeAccount(OWNER);
+    accounts.__reset();
+    assert.strictEqual(await accounts.getRecord(OWNER), null, 'sin fila de cuenta');
+
+    const page = await (await fetch(`${base}/api/admin/accounts/${OWNER}/history`, { headers: { cookie } })).json();
+    assert.ok(Array.isArray(page.events) && page.total >= 1, 'aun así se puede leer su historial');
+
+    const mine = page.events.map((event) => event.id);
+    const out = await deleteHistory(base, cookie, OWNER, { scope: 'ids', ids: mine });
+    assert.strictEqual(out.status, 200, 'y se puede borrar');
+    assert.strictEqual(out.body.removed, mine.length);
+
+    await login(base, OWNER, 'test-password', HWID_A);
+    assert.ok(await accounts.getRecord(OWNER), 'el login siguiente vuelve a provisionar la cuenta');
+  } finally {
+    server.close();
+  }
+});
+
 /* ---------------------------------------------------------------- runner -- */
 
 (async () => {
